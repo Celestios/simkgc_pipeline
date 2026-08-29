@@ -19,8 +19,16 @@ from transformers import AutoTokenizer, BertTokenizer
 import onnx
 from onnxruntime.quantization import quantize_dynamic, QuantType
 
-from src.model.biencoder import SimKGCBiEncoder
-from src.data.relations import CANONICAL_RELATIONS
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+try:
+    from src.model.biencoder import SimKGCBiEncoder
+    from src.data.relations import CANONICAL_RELATIONS
+except ImportError:
+    from model.biencoder import SimKGCBiEncoder
+    from data.relations import CANONICAL_RELATIONS
 
 def export_relations_metadata(output_path: Path):
     """Exports canonical relations metadata for Centrode Flutter/Rust UI."""

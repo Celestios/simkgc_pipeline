@@ -1,0 +1,32 @@
+# SimKGC Configuration for Persian + English Knowledge Graph Completion
+
+model:
+  backbone_name: "models/backbone"
+  prune_vocab_to_fa_en: false
+  target_languages: ["fa", "en"]
+  output_dimensions: [256, 128] # Primary: 256d, Auxiliary: 128d
+  max_seq_length: 64
+
+training:
+  batch_size: 64
+  learning_rate: 3.0e-5
+  warmup_ratio: 0.1
+  weight_decay: 0.01
+  num_train_epochs: 5
+  temperature: 0.05
+  use_fp16: true
+  logging_steps: 10
+  seed: 42
+
+data:
+  train_files:
+    - "data/raw/conceptnet_clean.json"
+  train_split: 0.85
+  eval_split: 0.15
+
+export:
+  checkpoint_dir: "checkpoints/simkgc_fa_en"
+  onnx_output_path: "exports/simkgc_256d.onnx"
+  quantized_onnx_path: "exports/simkgc_256d_int8.onnx"
+  concept_binary_path: "exports/concepts_256d_int8.bin"
+  concept_dict_path: "exports/concepts_dict.json"

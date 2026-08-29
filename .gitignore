@@ -1,0 +1,21 @@
+# Python virtual environment
+.venv/
+env/
+venv/
+ENV/
+
+# Python cache & bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Data directories (never commit data to git)
+data/
+exports/
+checkpoints/
+models/
+
+# OS artifacts
+.DS_Store
+Thumbs.db

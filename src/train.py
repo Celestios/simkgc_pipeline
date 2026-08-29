@@ -69,8 +69,26 @@ def train():
 
     collator = SimKGCCollator(tokenizer, max_seq_length=max_seq_length)
     actual_batch_size = max(2, min(batch_size, train_size))
-    train_loader = DataLoader(train_dataset, batch_size=actual_batch_size, shuffle=True, collate_fn=collator, drop_last=(train_size >= actual_batch_size and train_size % actual_batch_size == 0))
-    val_loader = DataLoader(val_dataset, batch_size=actual_batch_size, shuffle=False, collate_fn=collator) if val_size > 0 else None
+    num_workers = min(4, os.cpu_count() or 1)
+    
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=actual_batch_size,
+        shuffle=True,
+        collate_fn=collator,
+        num_workers=num_workers,
+        pin_memory=torch.cuda.is_available(),
+        persistent_workers=(num_workers > 0)
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=actual_batch_size,
+        shuffle=False,
+        collate_fn=collator,
+        num_workers=num_workers,
+        pin_memory=torch.cuda.is_available(),
+        persistent_workers=(num_workers > 0)
+    ) if val_size > 0 else None
 
     # 4. Optimizer, Loss & Scheduler
     criterion = SimKGCMatryoshkaLoss(temperature=temperature, primary_dim=output_dim, aux_dim=128)

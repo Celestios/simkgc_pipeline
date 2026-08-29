@@ -8,7 +8,7 @@ model:
   max_seq_length: 64
 
 training:
-  batch_size: 256                # High batch size for powerful in-batch contrastive negatives
+  batch_size: 512                # Increased batch size for maximum 2x T4 GPU saturation
   learning_rate: 3.0e-5
   warmup_ratio: 0.1
   weight_decay: 0.01

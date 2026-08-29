@@ -174,4 +174,4 @@ def run_production_export(checkpoint_dir: Path, data_files: list, output_dir: Pa
 
 if __name__ == "__main__":
     chk = Path("checkpoints/simkgc_fa_en")
-    run_production_export(chk, ["data/raw/conceptnet_clean.json", "data/synthetic/generated_triples.json"], Path("exports"))
+    run_production_export(chk, ["data/raw/conceptnet_clean.json"], Path("exports"))

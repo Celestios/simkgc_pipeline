@@ -156,15 +156,16 @@ def train():
         else:
             print(f"--> Epoch {epoch} Results: Avg Loss: {avg_loss:.4f}")
 
-    # 6. Save Checkpoint
-    output_dir = Path("checkpoints/simkgc_fa_en")
-    output_dir.mkdir(parents=True, exist_ok=True)
-    
-    raw_model = model.module if hasattr(model, "module") else model
-    torch.save(raw_model.state_dict(), output_dir / "simkgc_model.pt")
-    tokenizer.save_pretrained(output_dir)
-    raw_model.config.save_pretrained(output_dir)
-    print(f"\n[OK] Model checkpoint saved to {output_dir}")
+        # Save checkpoint every N epochs (default: 5)
+        save_every = config["training"].get("save_every_epochs", 5)
+        if epoch % save_every == 0 or epoch == epochs:
+            output_dir = Path("checkpoints/simkgc_fa_en")
+            output_dir.mkdir(parents=True, exist_ok=True)
+            raw_model = model.module if hasattr(model, "module") else model
+            torch.save(raw_model.state_dict(), output_dir / "simkgc_model.pt")
+            tokenizer.save_pretrained(output_dir)
+            raw_model.config.save_pretrained(output_dir)
+            print(f"[CHECKPOINT SAVED] Epoch {epoch}/{epochs} saved to {output_dir}")
 
 if __name__ == "__main__":
     train()

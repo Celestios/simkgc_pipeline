@@ -12,7 +12,8 @@ training:
   learning_rate: 3.0e-5
   warmup_ratio: 0.1
   weight_decay: 0.01
-  num_train_epochs: 10
+  num_train_epochs: 25           # Train for 25 epochs
+  save_every_epochs: 5           # Save checkpoint every 5 epochs
   temperature: 0.05
   use_fp16: true                 # GPU mixed precision
   logging_steps: 50

@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
 """
-Data Cleaning and Text Normalization Module for Knowledge Graph Completion.
-Handles:
-  1. Persian text normalization (Arabic Yeh/Kaf -> Persian Ye/Ke, ZWNJ handling).
-  2. ConceptNet suffix stripping (e.g. 'car (noun)' -> 'car', '/c/fa/ایران/n' -> 'ایران').
-  3. Graph cleaning: self-loop removal, deduplication, low-weight edge filtering, and casing.
+High-Precision Knowledge Graph Cleaner with Canonical Relation Filtering.
+Filters assertions to ensure:
+  1. Only canonical relations (IsA, PartOf, HasProperty, UsedFor, etc.) are preserved.
+  2. Persian text is standardized (Arabic characters -> Persian, ZWNJ normalization).
+  3. ConceptNet noisy suffixes and self-loops are purged.
+  4. Deduplicates assertions preserving maximum weight.
 """
 
 import re
 import json
+import argparse
 from pathlib import Path
 from typing import List, Dict, Tuple, Set
+from src.data.relations import canonicalize_relation, CANONICAL_RELATION_NAMES
 
-# Persian character normalization mappings
 PERSIAN_CHAR_MAP = {
     'ي': 'ی',
     'ك': 'ک',
@@ -23,39 +25,26 @@ PERSIAN_CHAR_MAP = {
     '۵': '5', '۶': '6', '۷': '7', '۸': '8', '۹': '9',
 }
 
-def normalize_text(text: str, lang: str = "fa") -> str:
-    """
-    Normalizes Persian and English concept strings.
-    """
+def normalize_concept_text(text: str, lang: str = "fa") -> str:
+    """Normalizes concept labels."""
     if not text:
         return ""
         
     text = text.strip()
-    
-    # Strip ConceptNet linguistic tags like ' (noun)', ' (verb)', ' (adjective)'
     text = re.sub(r'\s*\((noun|verb|adjective|adverb|n|v|adj|adv|phrase)\)', '', text, flags=re.IGNORECASE)
     
-    # Persian specific normalization
     if lang == "fa":
         for k, v in PERSIAN_CHAR_MAP.items():
             text = text.replace(k, v)
-        # Normalize multiple spaces and ZWNJ
-        text = re.sub(r'[\u200B-\u200D\uFEFF]', '\u200c', text) # Normalize to standard ZWNJ
+        text = re.sub(r'[\u200B-\u200D\uFEFF]', '\u200c', text)
         text = re.sub(r'\s+', ' ', text)
     else:
-        # English: normalize whitespace and lowercase
         text = re.sub(r'\s+', ' ', text).lower()
         
     return text.strip()
 
 def clean_knowledge_graph(triples: List[Dict], min_weight: float = 1.0) -> List[Dict]:
-    """
-    Cleans raw triplet dataset:
-      - Normalizes text in head, relation, tail.
-      - Removes self-loops (head == tail).
-      - Filters low-confidence or negative-weight assertions.
-      - Deduplicates triples preserving highest weight.
-    """
+    """Cleans raw assertions and maps relations to canonical ontology."""
     cleaned_map: Dict[Tuple[str, str, str], Dict] = {}
     
     for item in triples:
@@ -68,49 +57,56 @@ def clean_knowledge_graph(triples: List[Dict], min_weight: float = 1.0) -> List[
         if weight < min_weight:
             continue
             
-        head = normalize_text(head_raw, lang)
-        tail = normalize_text(tail_raw, lang)
-        rel = normalize_text(rel_raw, "en") # Keep relations standardized
+        canonical_rel = canonicalize_relation(rel_raw)
+        if not canonical_rel or canonical_rel not in CANONICAL_RELATION_NAMES:
+            continue
+            
+        head = normalize_concept_text(head_raw, lang)
+        tail = normalize_concept_text(tail_raw, lang)
         
-        # Discard invalid, empty, or self-loop triples
-        if not head or not tail or not rel or head == tail:
+        if not head or not tail or head == tail:
             continue
             
-        # Discard single punctuation tokens
-        if len(head) <= 1 and not head.isalnum():
-            continue
-        if len(tail) <= 1 and not tail.isalnum():
+        if len(head) > 50 or len(tail) > 50:
             continue
             
-        key = (head, rel, tail)
+        key = (head, canonical_rel, tail)
         if key not in cleaned_map or weight > cleaned_map[key]["weight"]:
             cleaned_map[key] = {
                 "head": head,
-                "relation": rel,
+                "relation": canonical_rel,
                 "tail": tail,
                 "lang": lang,
                 "weight": weight
             }
             
-    cleaned_list = list(cleaned_map.values())
-    return cleaned_list
+    return list(cleaned_map.values())
 
 def clean_dataset_file(input_path: Path, output_path: Path, min_weight: float = 1.0) -> int:
-    """Loads JSON dataset, cleans all records, and writes cleaned output."""
+    """Reads raw JSON dataset in chunks, cleans and writes canonical dataset."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    print(f"Reading raw dataset from {input_path}...")
+    
     with open(input_path, "r", encoding="utf-8") as f:
         raw_data = json.load(f)
         
+    print(f"Loaded {len(raw_data):,} raw assertions. Cleaning and filtering to canonical relations...")
     cleaned = clean_knowledge_graph(raw_data, min_weight=min_weight)
     
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(cleaned, f, ensure_ascii=False, indent=2)
         
-    print(f"Data Cleaning: {len(raw_data):,} raw -> {len(cleaned):,} clean triples ({len(raw_data) - len(cleaned):,} noisy items removed).")
+    print("=" * 65)
+    print(f"[CLEAN COMPLETE] {len(raw_data):,} raw -> {len(cleaned):,} canonical assertions.")
+    print(f"Saved to: {output_path} ({output_path.stat().st_size / 1024 / 1024:.1f} MB)")
+    print("=" * 65)
     return len(cleaned)
 
 if __name__ == "__main__":
-    raw_file = Path("data/raw/conceptnet_subset.json")
-    clean_file = Path("data/raw/conceptnet_clean.json")
-    if raw_file.exists():
-        clean_dataset_file(raw_file, clean_file)
+    parser = argparse.ArgumentParser(description="Clean and Canonicalize Knowledge Graph Data")
+    parser.add_argument("--input", type=str, default="data/raw/conceptnet_subset.json", help="Raw dataset path")
+    parser.add_argument("--output", type=str, default="data/raw/conceptnet_clean.json", help="Cleaned dataset path")
+    parser.add_argument("--min-weight", type=float, default=1.0, help="Minimum assertion weight")
+    args = parser.parse_args()
+
+    clean_dataset_file(Path(args.input), Path(args.output), min_weight=args.min_weight)

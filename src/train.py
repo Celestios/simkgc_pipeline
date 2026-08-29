@@ -92,6 +92,8 @@ def train():
     print(f"Starting SimKGC Training: {epochs} epochs | Train: {len(train_dataset)} | Val: {len(val_dataset)}")
     print("=" * 60)
 
+    best_val_mrr = 0.0
+
     for epoch in range(1, epochs + 1):
         model.train()
         total_loss = 0.0
@@ -153,10 +155,30 @@ def train():
             h1_pct = (hits_1 / max(1, total_val)) * 100.0
             h10_pct = (hits_10 / max(1, total_val)) * 100.0
             print(f"--> Epoch {epoch} Results: Avg Loss: {avg_loss:.4f} | Val MRR: {val_mrr:.4f} | Hits@1: {h1_pct:.1f}% | Hits@10: {h10_pct:.1f}%")
+
+            # Check and save if this is the Best Model so far
+            if val_mrr > best_val_mrr:
+                best_val_mrr = val_mrr
+                output_dir = Path("checkpoints/simkgc_fa_en")
+                output_dir.mkdir(parents=True, exist_ok=True)
+                raw_model = model.module if hasattr(model, "module") else model
+                torch.save(raw_model.state_dict(), output_dir / "simkgc_model.pt")
+                tokenizer.save_pretrained(output_dir)
+                raw_model.config.save_pretrained(output_dir)
+                
+                # Save metadata
+                with open(output_dir / "best_model_meta.json", "w", encoding="utf-8") as f:
+                    json.dump({
+                        "best_epoch": epoch,
+                        "val_mrr": val_mrr,
+                        "hits_at_1": h1_pct,
+                        "hits_at_10": h10_pct
+                    }, f, indent=2)
+                print(f"★ [NEW BEST MODEL] Saved checkpoint for Epoch {epoch} (Val MRR: {val_mrr:.4f}) to {output_dir}")
         else:
             print(f"--> Epoch {epoch} Results: Avg Loss: {avg_loss:.4f}")
 
-        # Save checkpoint every N epochs (default: 5)
+        # Regular periodic checkpoint every N epochs
         save_every = config["training"].get("save_every_epochs", 5)
         if epoch % save_every == 0 or epoch == epochs:
             output_dir = Path("checkpoints/simkgc_fa_en")

@@ -8,12 +8,22 @@ Filters assertions to ensure:
   4. Deduplicates assertions preserving maximum weight.
 """
 
+import sys
 import re
 import json
 import argparse
 from pathlib import Path
 from typing import List, Dict, Tuple, Set
-from src.data.relations import canonicalize_relation, CANONICAL_RELATION_NAMES
+
+# Ensure repo root is in Python module search path
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+try:
+    from src.data.relations import canonicalize_relation, CANONICAL_RELATION_NAMES
+except ImportError:
+    from relations import canonicalize_relation, CANONICAL_RELATION_NAMES
 
 PERSIAN_CHAR_MAP = {
     'ي': 'ی',

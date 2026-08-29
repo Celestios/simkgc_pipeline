@@ -148,10 +148,16 @@ def run_production_export(checkpoint_dir: Path, data_files: list, output_dir: Pa
     # 2. Extract concepts and pre-encode
     concepts = collect_unique_concepts(data_files)
     if len(concepts) > 0:
-        print(f"Pre-encoding {len(concepts)} unique concepts from dataset...")
-        inputs = tokenizer(concepts, padding=True, truncation=True, max_length=64, return_tensors="pt")
-        with torch.no_grad():
-            embeddings = model.encode(inputs["input_ids"], inputs["attention_mask"]).numpy()
+        print(f"Pre-encoding {len(concepts):,} unique concepts from dataset in batches...")
+        all_embeddings = []
+        chunk_size = 256
+        for i in range(0, len(concepts), chunk_size):
+            batch = concepts[i:i + chunk_size]
+            inputs = tokenizer(batch, padding=True, truncation=True, max_length=64, return_tensors="pt")
+            with torch.no_grad():
+                emb = model.encode(inputs["input_ids"], inputs["attention_mask"]).numpy()
+                all_embeddings.append(emb)
+        embeddings = np.vstack(all_embeddings)
             
         export_concepts_to_rust_binary(
             concepts=concepts,

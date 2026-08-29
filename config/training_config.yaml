@@ -1,26 +1,27 @@
-# SimKGC Configuration for Persian + English Knowledge Graph Completion
+# SimKGC Configuration for Persian + English Knowledge Graph Completion (Kaggle GPU & Production)
 
 model:
-  backbone_name: "models/backbone"
-  prune_vocab_to_fa_en: false
+  backbone_name: "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+  prune_vocab_to_fa_en: true     # Slices unused alphabets, reducing embedding matrix by 60%
   target_languages: ["fa", "en"]
-  output_dimensions: [256, 128] # Primary: 256d, Auxiliary: 128d
+  output_dimensions: [256, 128]  # Primary: 256d, Auxiliary Matryoshka: 128d
   max_seq_length: 64
 
 training:
-  batch_size: 64
+  batch_size: 256                # Optimized for Kaggle 2x T4 GPU
   learning_rate: 3.0e-5
   warmup_ratio: 0.1
   weight_decay: 0.01
-  num_train_epochs: 5
+  num_train_epochs: 10
   temperature: 0.05
-  use_fp16: true
+  use_fp16: true                 # GPU mixed precision
   logging_steps: 10
   seed: 42
 
 data:
   train_files:
     - "data/raw/conceptnet_clean.json"
+    - "data/synthetic/generated_triples.json"
   train_split: 0.85
   eval_split: 0.15
 

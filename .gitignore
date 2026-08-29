@@ -11,10 +11,10 @@ __pycache__/
 .pytest_cache/
 
 # Data directories (never commit data to git)
-data/
-exports/
-checkpoints/
-models/
+/data/
+/exports/
+/checkpoints/
+/models/
 
 # OS artifacts
 .DS_Store

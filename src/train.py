@@ -107,13 +107,31 @@ def train():
     scaler = torch.cuda.amp.GradScaler(enabled=config["training"].get("use_fp16", True) and torch.cuda.is_available())
 
     # 5. Training & Evaluation Loop
+    start_epoch = 1
+    best_val_mrr = 0.0
+    chk_dir = Path("checkpoints/simkgc_fa_en")
+    chk_file = chk_dir / "simkgc_model.pt"
+    meta_file = chk_dir / "best_model_meta.json"
+
+    if chk_file.exists():
+        try:
+            raw_model = model.module if hasattr(model, "module") else model
+            raw_model.load_state_dict(torch.load(chk_file, map_location="cpu"))
+            if meta_file.exists():
+                with open(meta_file, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+                    start_epoch = meta.get("best_epoch", 1) + 1
+                    best_val_mrr = meta.get("val_mrr", 0.0)
+            print(f"★ [RESUMING CHECKPOINT] Loaded trained weights from {chk_file}.")
+            print(f"  Resuming from Epoch {start_epoch}/{epochs} (Previous Best Val MRR: {best_val_mrr:.4f}).")
+        except Exception as e:
+            print(f"Warning: Could not resume checkpoint ({e}). Starting fresh.")
+
     print("\n" + "=" * 60)
-    print(f"Starting SimKGC Training: {epochs} epochs | Train: {len(train_dataset)} | Val: {len(val_dataset)}")
+    print(f"Starting SimKGC Training: Epochs {start_epoch} -> {epochs} | Train: {len(train_dataset)} | Val: {len(val_dataset)}")
     print("=" * 60)
 
-    best_val_mrr = 0.0
-
-    for epoch in range(1, epochs + 1):
+    for epoch in range(start_epoch, epochs + 1):
         model.train()
         total_loss = 0.0
         

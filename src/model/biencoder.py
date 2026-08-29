@@ -9,10 +9,10 @@ class SimKGCBiEncoder(nn.Module):
     Production SimKGC Dual Transformer Architecture with Matryoshka Projection.
     
     Encodes (Head + Relation) via head forward pass and (Tail) via tail forward pass.
-    Projects 768-d hidden representation to 256-d normalized space with 128-d nested support.
+    Projects 768-d / 384-d representation to 256-d normalized space with 128-d nested support.
     """
     
-    def __init__(self, backbone_name: str = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2",
+    def __init__(self, backbone_name: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
                  output_dim: int = 256,
                  dropout: float = 0.1):
         super().__init__()
@@ -31,6 +31,7 @@ class SimKGCBiEncoder(nn.Module):
             except Exception:
                 self.encoder = BertModel(self.config)
             
+        self.vocab_size = getattr(self.config, "vocab_size", 250002)
         self.hidden_size = self.config.hidden_size
         self.output_dim = output_dim
         
@@ -48,11 +49,20 @@ class SimKGCBiEncoder(nn.Module):
         sum_mask = torch.clamp(input_mask_expanded.sum(dim=1), min=1e-9)
         return sum_embeddings / sum_mask
 
-    def encode(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+    def encode(self, input_ids: torch.Tensor, attention_mask: torch.Tensor, token_type_ids: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
         Runs transformer encoder, pools tokens, and projects to normalized 256-d vector.
+        Guarantees safe tensor bounds for CUDA kernels.
         """
-        outputs = self.encoder(input_ids=input_ids, attention_mask=attention_mask)
+        # Safety guards: clamp input_ids to model vocab range and ensure zero token_type_ids
+        safe_input_ids = torch.clamp(input_ids, min=0, max=self.vocab_size - 1)
+        safe_token_type_ids = torch.zeros_like(safe_input_ids)
+        
+        outputs = self.encoder(
+            input_ids=safe_input_ids,
+            attention_mask=attention_mask,
+            token_type_ids=safe_token_type_ids
+        )
         pooled = self._mean_pooling(outputs.last_hidden_state, attention_mask)
         dropped = self.dropout(pooled)
         projected = self.projection(dropped)

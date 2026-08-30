@@ -36,7 +36,7 @@ class SimKGCDistillationLoss(nn.Module):
     Teacher-Student Distillation Loss without artificial sub-vector slicing.
     Focuses 100% of gradient capacity on full 256-d alignment with BGE-M3 teacher targets.
     """
-    def __init__(self, temperature: float = 0.05, alpha: float = 0.5):
+    def __init__(self, temperature: float = 0.05, alpha: float = 0.5, **kwargs):
         super().__init__()
         self.temperature = temperature
         self.alpha = alpha  # Balance between direct cosine regression and in-batch contrastive matching

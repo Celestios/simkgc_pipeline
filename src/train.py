@@ -79,15 +79,14 @@ def train():
             print(f"[DISTILLATION MODE] Ready with {len(teacher_concepts):,} concept targets.")
             criterion = SimKGCDistillationLoss(
                 temperature=temperature,
-                alpha=float(distill_cfg.get("alpha", 0.7)),
-                aux_dim=128
+                alpha=float(distill_cfg.get("alpha", 0.5))
             )
         else:
             print(f"[WARNING] Distillation enabled but cache not found ({teacher_cache_path}). Falling back to standard InfoNCE.")
             distill_enabled = False
-            criterion = SimKGCMatryoshkaLoss(temperature=temperature, primary_dim=output_dim, aux_dim=128)
+            criterion = SimKGCMatryoshkaLoss(temperature=temperature, primary_dim=output_dim)
     else:
-        criterion = SimKGCMatryoshkaLoss(temperature=temperature, primary_dim=output_dim, aux_dim=128)
+        criterion = SimKGCMatryoshkaLoss(temperature=temperature, primary_dim=output_dim)
 
     # 4. Prepare Dataset & DataLoader
     data_files = config["data"]["train_files"]

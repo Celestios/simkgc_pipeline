@@ -3,21 +3,36 @@
 Production ONNX & Rust Binary Exporter for Centrode.
 Exports:
   1. simkgc_256d.onnx / simkgc_256d_int8.onnx (Inference Bi-Encoder for Rust runtime)
-  2. concepts_256d_int8.bin (Zero-copy flat memory-mappable INT8 concept matrix)
-  3. concepts_dict.json (Index to concept string dictionary)
+  2. concepts_256d_int8.bin (Zero-copy flat memory-mappable INT8 concept matrix of top 50k concepts)
+  3. concepts_dict.json (Index to concept string dictionary for the 50k concepts)
   4. relations_ontology.json (List of canonical relations with descriptions for Centrode UI)
 """
 
+import os
 import sys
+import re
 import json
+import math
 import struct
-import torch
-import numpy as np
 from pathlib import Path
-from typing import List, Dict
-from transformers import AutoTokenizer, BertTokenizer
-import onnx
-from onnxruntime.quantization import quantize_dynamic, QuantType
+from typing import List, Dict, Tuple, Set, Optional
+from collections import defaultdict
+try:
+    import torch
+except ImportError:
+    torch = None
+
+try:
+    import numpy as np
+except ImportError:
+    np = None
+
+try:
+    from transformers import AutoTokenizer, BertTokenizer
+    import onnx
+    from onnxruntime.quantization import quantize_dynamic, QuantType
+except ImportError:
+    AutoTokenizer = BertTokenizer = onnx = quantize_dynamic = QuantType = None
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
@@ -25,10 +40,112 @@ if str(REPO_ROOT) not in sys.path:
 
 try:
     from src.model.biencoder import SimKGCBiEncoder
+except (ImportError, ModuleNotFoundError):
+    SimKGCBiEncoder = None
+
+try:
     from src.data.relations import CANONICAL_RELATIONS
-except ImportError:
-    from model.biencoder import SimKGCBiEncoder
-    from data.relations import CANONICAL_RELATIONS
+except (ImportError, ModuleNotFoundError):
+    CANONICAL_RELATIONS = []
+
+PERSIAN_CHAR_REGEX = re.compile(r"[\u0600-\u06FF\u0750-\u077F\uFB50-\uFDFF\uFE70-\uFEFF]")
+
+def is_persian_text(text: str) -> bool:
+    """Returns True if text contains Persian/Arabic characters."""
+    return bool(PERSIAN_CHAR_REGEX.search(text))
+
+def is_valid_concept_string(text: str) -> bool:
+    """
+    Lexical quality filter to discard noise, URLs, long conversational text, and pure digits.
+    """
+    t = text.strip()
+    if len(t) < 2 or len(t) > 45:
+        return False
+    # Max 4 words
+    words = t.split()
+    if len(words) > 4:
+        return False
+    # Drop pure numbers
+    if t.isdigit() or t.replace(".", "", 1).isdigit():
+        return False
+    # Drop URLs and markdown artifacts
+    if "http" in t or "www." in t or "[" in t or "]" in t or "{" in t or "}" in t:
+        return False
+    return True
+
+def select_top_production_concepts(
+    data_paths: List[str],
+    total_quota: int = 50000,
+    fa_quota: int = 15000,
+    en_quota: int = 35000
+) -> List[str]:
+    """
+    Selects the top-ranked concepts using the Composite Centrality & Quality Score:
+      Score(c) = log(1 + deg(c)) * (1 + 0.3 * min(unique_relations, 10)) * avg_weight
+    Guarantees a balanced distribution between Persian and English concepts.
+    """
+    print(f"\n[Concept Curator] Analyzing knowledge graph for Top {total_quota:,} central concepts...")
+    
+    degrees = defaultdict(int)
+    unique_rels = defaultdict(set)
+    weight_sums = defaultdict(float)
+    
+    for path_str in data_paths:
+        p = Path(path_str)
+        if not p.exists():
+            continue
+        with open(p, "r", encoding="utf-8") as f:
+            triples = json.load(f)
+            for item in triples:
+                h = item.get("head", "").strip()
+                t = item.get("tail", "").strip()
+                r = item.get("relation", "").strip()
+                w = float(item.get("weight", 1.0))
+                
+                if h and is_valid_concept_string(h):
+                    degrees[h] += 1
+                    unique_rels[h].add(r)
+                    weight_sums[h] += w
+                    
+                if t and is_valid_concept_string(t):
+                    degrees[t] += 1
+                    unique_rels[t].add(r)
+                    weight_sums[t] += w
+
+    scored_fa = []
+    scored_en = []
+    
+    for concept, deg in degrees.items():
+        rel_count = min(len(unique_rels[concept]), 10)
+        avg_weight = weight_sums[concept] / deg
+        score = math.log1p(deg) * (1.0 + 0.3 * rel_count) * avg_weight
+        
+        if is_persian_text(concept):
+            scored_fa.append((score, concept))
+        else:
+            scored_en.append((score, concept))
+            
+    scored_fa.sort(key=lambda x: x[0], reverse=True)
+    scored_en.sort(key=lambda x: x[0], reverse=True)
+    
+    print(f"[Concept Curator] Found {len(scored_fa):,} valid Persian and {len(scored_en):,} valid English candidates.")
+    
+    selected_fa = [c for _, c in scored_fa[:fa_quota]]
+    selected_en = [c for _, c in scored_en[:en_quota]]
+    
+    combined = selected_fa + selected_en
+    # If one language fell short of quota, backfill from remaining pool
+    if len(combined) < total_quota:
+        remaining_fa = [c for _, c in scored_fa[fa_quota:]]
+        remaining_en = [c for _, c in scored_en[en_quota:]]
+        all_remaining = sorted(remaining_fa + remaining_en, key=lambda x: degrees[x], reverse=True)
+        combined.extend(all_remaining[:total_quota - len(combined)])
+        
+    print(f"[Concept Curator] Curated exactly {len(combined):,} top concepts:")
+    print(f"  - Persian: {len(selected_fa):,} concepts")
+    print(f"  - English: {len(selected_en):,} concepts")
+    
+    return combined
 
 def export_relations_metadata(output_path: Path):
     """Exports canonical relations metadata for Centrode Flutter/Rust UI."""
@@ -122,24 +239,19 @@ def export_concepts_to_rust_binary(
     print(f"     Binary:     {bin_output_path} ({bin_output_path.stat().st_size / 1024 / 1024:.2f} MB)")
     print(f"     Dictionary: {dict_output_path}")
 
-def collect_unique_concepts(data_paths: list) -> list:
-    """Collects unique head and tail concepts from dataset files."""
-    concepts = set()
-    for p in data_paths:
-        file_path = Path(p)
-        if file_path.exists():
-            with open(file_path, "r", encoding="utf-8") as f:
-                items = json.load(f)
-                for it in items:
-                    if "head" in it and it["head"]:
-                        concepts.add(it["head"].strip())
-                    if "tail" in it and it["tail"]:
-                        concepts.add(it["tail"].strip())
-    return sorted(list(concepts))
-
-def run_production_export(checkpoint_dir: Path, data_files: list, output_dir: Path):
+def run_production_export(
+    checkpoint_dir: Path,
+    data_files: list,
+    output_dir: Path,
+    max_concepts: int = 50000,
+    fa_quota: int = 15000,
+    en_quota: int = 35000,
+    teacher_cache_path: Optional[Path] = None,
+    teacher_dict_path: Optional[Path] = None
+):
     """Full export sequence producing all 4 production assets for Centrode."""
     output_dir.mkdir(parents=True, exist_ok=True)
+    
     try:
         tokenizer = AutoTokenizer.from_pretrained(checkpoint_dir)
     except Exception:
@@ -158,11 +270,39 @@ def run_production_export(checkpoint_dir: Path, data_files: list, output_dir: Pa
     # 2. Relations Ontology Metadata
     export_relations_metadata(output_dir / "relations_ontology.json")
     
-    # 3. Concept Pre-encoding on GPU (in high-throughput batches)
-    concepts = collect_unique_concepts(data_files)
-    if len(concepts) > 0:
+    # 3. Curate Top 50,000 Concepts
+    selected_concepts = select_top_production_concepts(
+        data_paths=data_files,
+        total_quota=max_concepts,
+        fa_quota=fa_quota,
+        en_quota=en_quota
+    )
+    
+    # 4. Check if Teacher Cache exists for instant vector lookup
+    embeddings = None
+    if teacher_cache_path and teacher_dict_path and teacher_cache_path.exists() and teacher_dict_path.exists():
+        print(f"\n[Teacher Cache] Reusing high-grade BGE-M3 teacher vectors from {teacher_cache_path}...")
+        teacher_npy = np.load(teacher_cache_path)
+        with open(teacher_dict_path, "r", encoding="utf-8") as f:
+            cached_concepts = json.load(f)
+        c_to_idx = {c: i for i, c in enumerate(cached_concepts)}
+        
+        found_embeddings = []
+        valid_concepts = []
+        for c in selected_concepts:
+            if c in c_to_idx:
+                found_embeddings.append(teacher_npy[c_to_idx[c]])
+                valid_concepts.append(c)
+                
+        if len(found_embeddings) >= int(0.9 * len(selected_concepts)):
+            embeddings = np.vstack(found_embeddings)
+            selected_concepts = valid_concepts
+            print(f"[Teacher Cache] Successfully extracted {len(selected_concepts):,} concept vectors from teacher cache!")
+
+    # Fallback: compute embeddings via model if teacher cache wasn't provided or incomplete
+    if embeddings is None and len(selected_concepts) > 0:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        print(f"\nPre-encoding {len(concepts):,} unique concepts on {device} (Batch size: 2048)...")
+        print(f"\nPre-encoding {len(selected_concepts):,} concepts on {device} (Batch size: 2048)...")
         
         model.to(device)
         if torch.cuda.device_count() > 1:
@@ -172,10 +312,10 @@ def run_production_export(checkpoint_dir: Path, data_files: list, output_dir: Pa
         chunk_size = 2048 if torch.cuda.is_available() else 256
         
         from tqdm import tqdm
-        pbar = tqdm(total=len(concepts), desc="Encoding Concepts", unit="concept")
+        pbar = tqdm(total=len(selected_concepts), desc="Encoding Concepts", unit="concept")
         
-        for i in range(0, len(concepts), chunk_size):
-            batch = concepts[i:i + chunk_size]
+        for i in range(0, len(selected_concepts), chunk_size):
+            batch = selected_concepts[i:i + chunk_size]
             inputs = tokenizer(batch, padding=True, truncation=True, max_length=64, return_tensors="pt")
             input_ids = inputs["input_ids"].to(device)
             attention_mask = inputs["attention_mask"].to(device)
@@ -189,15 +329,39 @@ def run_production_export(checkpoint_dir: Path, data_files: list, output_dir: Pa
             
         pbar.close()
         embeddings = np.vstack(all_embeddings)
-            
-        export_concepts_to_rust_binary(
-            concepts=concepts,
-            embeddings=embeddings,
-            bin_output_path=output_dir / "concepts_256d_int8.bin",
-            dict_output_path=output_dir / "concepts_dict.json",
-            quantize_int8=True
-        )
+        
+    export_concepts_to_rust_binary(
+        concepts=selected_concepts,
+        embeddings=embeddings,
+        bin_output_path=output_dir / "concepts_256d_int8.bin",
+        dict_output_path=output_dir / "concepts_dict.json",
+        quantize_int8=True
+    )
+    print("\n[SUCCESS] Production export sequence completed successfully!")
 
 if __name__ == "__main__":
-    chk = Path("checkpoints/simkgc_fa_en")
-    run_production_export(chk, ["data/raw/conceptnet_clean.json"], Path("exports"))
+    import argparse
+    parser = argparse.ArgumentParser(description="Export Centrode Production Model & 50K Concept Matrix")
+    parser.add_argument("--checkpoint", default="checkpoints/simkgc_fa_en", help="Path to checkpoint directory")
+    parser.add_argument("--data", default="data/raw/conceptnet_clean.json", help="Path to clean dataset")
+    parser.add_argument("--output", default="exports", help="Output export directory")
+    parser.add_argument("--max-concepts", type=int, default=50000, help="Max concepts in shipped binary")
+    parser.add_argument("--fa-quota", type=int, default=15000, help="Persian concept quota")
+    parser.add_argument("--en-quota", type=int, default=35000, help="English concept quota")
+    parser.add_argument("--teacher-cache", default="cache/bge_m3_concept_targets.npy", help="Teacher cache path")
+    parser.add_argument("--teacher-dict", default="cache/concepts_dict.json", help="Teacher dict path")
+    args = parser.parse_args()
+    
+    t_cache = Path(args.teacher_cache) if args.teacher_cache else None
+    t_dict = Path(args.teacher_dict) if args.teacher_dict else None
+    
+    run_production_export(
+        checkpoint_dir=Path(args.checkpoint),
+        data_files=[args.data],
+        output_dir=Path(args.output),
+        max_concepts=args.max_concepts,
+        fa_quota=args.fa_quota,
+        en_quota=args.en_quota,
+        teacher_cache_path=t_cache,
+        teacher_dict_path=t_dict
+    )

@@ -4,6 +4,7 @@ import json
 import yaml
 import torch
 import torch.nn as nn
+import numpy as np
 from pathlib import Path
 from torch.utils.data import DataLoader, random_split
 from transformers import AutoTokenizer, get_cosine_schedule_with_warmup
@@ -12,7 +13,7 @@ from transformers import AutoTokenizer, get_cosine_schedule_with_warmup
 sys.path.append(str(Path(__file__).parent.parent))
 
 from src.model.biencoder import SimKGCBiEncoder
-from src.model.loss import SimKGCMatryoshkaLoss
+from src.model.loss import SimKGCMatryoshkaLoss, SimKGCDistillationLoss
 from src.model.vocab_pruner import prune_vocab_and_weights
 from src.data.dataset import SimKGCDataset, SimKGCCollator
 
@@ -47,7 +48,7 @@ def train():
     model = SimKGCBiEncoder(backbone_name=backbone_name, output_dim=output_dim)
 
     # 2. Prune Vocabulary if configured
-    if config["model"].get("prune_vocab_to_fa_en", True):
+    if config["model"].get("prune_vocab_to_fa_en", False):
         prune_vocab_and_weights(tokenizer, model)
 
     model.to(device)
@@ -57,17 +58,49 @@ def train():
         print(f"Using {torch.cuda.device_count()} GPUs with DataParallel.")
         model = nn.DataParallel(model)
 
-    # 3. Prepare Dataset & DataLoader
-    data_files = config["data"].get("train_files", ["data/raw/conceptnet_subset.json", "data/synthetic/generated_triples.json"])
+    # 3. Check for Distillation Mode
+    distill_cfg = config.get("distillation", {})
+    distill_enabled = distill_cfg.get("enabled", False)
+    teacher_embeddings = None
+    concept_to_idx = None
+    
+    if distill_enabled:
+        teacher_cache_path = Path(distill_cfg.get("teacher_cache_path", "cache/bge_m3_concept_targets.npy"))
+        teacher_dict_path = Path(distill_cfg.get("teacher_dict_path", "cache/concepts_dict.json"))
+        
+        if teacher_cache_path.exists() and teacher_dict_path.exists():
+            print(f"\n[DISTILLATION MODE] Loading teacher targets from: {teacher_cache_path}")
+            teacher_npy = np.load(teacher_cache_path)
+            teacher_embeddings = torch.from_numpy(teacher_npy).float()
+            
+            with open(teacher_dict_path, "r", encoding="utf-8") as f:
+                teacher_concepts = json.load(f)
+            concept_to_idx = {c: i for i, c in enumerate(teacher_concepts)}
+            print(f"[DISTILLATION MODE] Ready with {len(teacher_concepts):,} concept targets.")
+            criterion = SimKGCDistillationLoss(
+                temperature=temperature,
+                alpha=float(distill_cfg.get("alpha", 0.7)),
+                aux_dim=128
+            )
+        else:
+            print(f"[WARNING] Distillation enabled but cache not found ({teacher_cache_path}). Falling back to standard InfoNCE.")
+            distill_enabled = False
+            criterion = SimKGCMatryoshkaLoss(temperature=temperature, primary_dim=output_dim, aux_dim=128)
+    else:
+        criterion = SimKGCMatryoshkaLoss(temperature=temperature, primary_dim=output_dim, aux_dim=128)
+
+    # 4. Prepare Dataset & DataLoader
+    data_files = config["data"]["train_files"]
     full_dataset = SimKGCDataset(data_files)
-    train_size = int(config["data"].get("train_split", 0.9) * len(full_dataset))
+    train_size = int(config["data"]["train_split"] * len(full_dataset))
     val_size = len(full_dataset) - train_size
+
     train_dataset, val_dataset = random_split(
         full_dataset, [train_size, val_size],
         generator=torch.Generator().manual_seed(config["data"].get("seed", 42))
     )
 
-    collator = SimKGCCollator(tokenizer, max_seq_length=max_seq_length)
+    collator = SimKGCCollator(tokenizer, max_seq_length=max_seq_length, concept_to_idx=concept_to_idx)
     actual_batch_size = max(2, min(batch_size, train_size))
     num_workers = min(4, os.cpu_count() or 1)
     
@@ -90,10 +123,7 @@ def train():
         persistent_workers=(num_workers > 0)
     ) if val_size > 0 else None
 
-    # 4. Optimizer, Loss & Scheduler
-    criterion = SimKGCMatryoshkaLoss(temperature=temperature, primary_dim=output_dim, aux_dim=128)
-    
-    # Weight decay exclusion for bias and LayerNorm
+    # 5. Optimizer, Loss & Scheduler
     no_decay = ["bias", "LayerNorm.weight"]
     optimizer_grouped_parameters = [
         {"params": [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)], "weight_decay": config["training"].get("weight_decay", 0.01)},
@@ -106,7 +136,7 @@ def train():
     scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps)
     scaler = torch.cuda.amp.GradScaler(enabled=config["training"].get("use_fp16", True) and torch.cuda.is_available())
 
-    # 5. Training & Evaluation Loop
+    # 6. Checkpoint Resume
     start_epoch = 1
     best_val_mrr = 0.0
     chk_dir = Path("checkpoints/simkgc_fa_en")
@@ -128,7 +158,8 @@ def train():
             print(f"Warning: Could not resume checkpoint ({e}). Starting fresh.")
 
     print("\n" + "=" * 60)
-    print(f"Starting SimKGC Training: Epochs {start_epoch} -> {epochs} | Train: {len(train_dataset)} | Val: {len(val_dataset)}")
+    mode_str = "Teacher-Distilled" if distill_enabled else "Standard SimKGC"
+    print(f"Starting {mode_str} Training: Epochs {start_epoch} -> {epochs} | Train: {len(train_dataset)} | Val: {len(val_dataset)}")
     print("=" * 60)
 
     for epoch in range(start_epoch, epochs + 1):
@@ -145,7 +176,13 @@ def train():
             
             with torch.cuda.amp.autocast(enabled=scaler.is_enabled()):
                 hr_vecs, t_vecs = model(hr_ids, hr_mask, t_ids, t_mask)
-                loss = criterion(hr_vecs, t_vecs)
+                
+                if distill_enabled and teacher_embeddings is not None and "tail_indices" in batch:
+                    tail_idx = batch["tail_indices"]
+                    teacher_targets = teacher_embeddings[tail_idx].to(device)
+                    loss = criterion(hr_vecs, t_vecs, teacher_targets)
+                else:
+                    loss = criterion(hr_vecs, t_vecs)
 
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -174,12 +211,15 @@ def train():
                     v_t_mask = vbatch["tail_attention_mask"].to(device)
                     
                     v_hr_vecs, v_t_vecs = model(v_hr_ids, v_hr_mask, v_t_ids, v_t_mask)
-                    # Pairwise similarity matrix (BatchSize x BatchSize)
-                    sim_scores = torch.matmul(v_hr_vecs, v_t_vecs.T)
                     
+                    if distill_enabled and teacher_embeddings is not None and "tail_indices" in vbatch:
+                        v_teacher_targets = teacher_embeddings[vbatch["tail_indices"]].to(device)
+                        sim_scores = torch.matmul(v_hr_vecs, v_teacher_targets.T)
+                    else:
+                        sim_scores = torch.matmul(v_hr_vecs, v_t_vecs.T)
+                        
                     for i in range(v_hr_vecs.size(0)):
                         target_score = sim_scores[i, i].item()
-                        # Rank: count how many candidates scored >= target_score
                         rank = (sim_scores[i] >= target_score).sum().item()
                         reciprocal_ranks.append(1.0 / rank)
                         if rank == 1:
@@ -203,13 +243,13 @@ def train():
                 tokenizer.save_pretrained(output_dir)
                 raw_model.config.save_pretrained(output_dir)
                 
-                # Save metadata
                 with open(output_dir / "best_model_meta.json", "w", encoding="utf-8") as f:
                     json.dump({
                         "best_epoch": epoch,
                         "val_mrr": val_mrr,
                         "hits_at_1": h1_pct,
-                        "hits_at_10": h10_pct
+                        "hits_at_10": h10_pct,
+                        "mode": "distilled" if distill_enabled else "standard"
                     }, f, indent=2)
                 print(f"★ [NEW BEST MODEL] Saved checkpoint for Epoch {epoch} (Val MRR: {val_mrr:.4f}) to {output_dir}")
         else:

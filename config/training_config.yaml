@@ -7,6 +7,13 @@ model:
   output_dimensions: [256, 128]  # Matryoshka dimensions (256d primary + 128d nested)
   max_seq_length: 64
 
+distillation:
+  enabled: true                  # Teacher-student distillation mode
+  teacher_model: "BAAI/bge-m3"   # 560M state-of-the-art multilingual teacher
+  teacher_cache_path: "cache/bge_m3_concept_targets.npy"
+  teacher_dict_path: "cache/concepts_dict.json"
+  alpha: 0.7                     # 70% direct teacher cosine alignment, 30% contrastive matching
+
 training:
   batch_size: 512                # Increased batch size for maximum 2x T4 GPU saturation
   learning_rate: 3.0e-5
@@ -31,3 +38,6 @@ export:
   quantized_onnx_path: "exports/simkgc_256d_int8.onnx"
   concept_binary_path: "exports/concepts_256d_int8.bin"
   concept_dict_path: "exports/concepts_dict.json"
+  max_production_concepts: 50000 # Top 50,000 concepts in shipped binary (~12.8 MB)
+  persian_quota: 15000           # 15,000 Persian concepts
+  english_quota: 35000           # 35,000 English concepts

@@ -1,7 +1,7 @@
 import json
 import torch
 from pathlib import Path
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 from torch.utils.data import Dataset
 
 class SimKGCDataset(Dataset):
@@ -32,11 +32,13 @@ class SimKGCDataset(Dataset):
 class SimKGCCollator:
     """
     Collates raw string triplets into tokenized PyTorch tensors for head-relation and tail.
+    Optionally attaches teacher concept target indices for zero-overhead distillation.
     """
     
-    def __init__(self, tokenizer, max_seq_length: int = 64):
+    def __init__(self, tokenizer, max_seq_length: int = 64, concept_to_idx: Optional[Dict[str, int]] = None):
         self.tokenizer = tokenizer
         self.max_seq_length = max_seq_length
+        self.concept_to_idx = concept_to_idx
         self.sep_token = tokenizer.sep_token if tokenizer.sep_token else "[SEP]"
 
     def __call__(self, batch: List[Tuple[str, str, str]]) -> Dict[str, torch.Tensor]:
@@ -59,9 +61,15 @@ class SimKGCCollator:
             return_tensors="pt"
         )
         
-        return {
+        batch_dict = {
             "hr_input_ids": hr_encodings["input_ids"],
             "hr_attention_mask": hr_encodings["attention_mask"],
             "tail_input_ids": tail_encodings["input_ids"],
             "tail_attention_mask": tail_encodings["attention_mask"]
         }
+        
+        if self.concept_to_idx is not None:
+            tail_indices = [self.concept_to_idx.get(tail, 0) for tail in tail_texts]
+            batch_dict["tail_indices"] = torch.tensor(tail_indices, dtype=torch.long)
+            
+        return batch_dict

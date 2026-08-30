@@ -38,5 +38,37 @@ class TestExportBinary(unittest.TestCase):
         if out_dict.exists():
             out_dict.unlink()
 
+    def test_concept_filtering_and_selection(self):
+        import json
+        from src.export import is_persian_text, is_valid_concept_string, select_top_production_concepts
+        
+        self.assertTrue(is_persian_text("ایران"))
+        self.assertTrue(is_persian_text("هوش مصنوعی"))
+        self.assertFalse(is_persian_text("Artificial Intelligence"))
+        
+        self.assertTrue(is_valid_concept_string("دانشگاه تهران"))
+        self.assertFalse(is_valid_concept_string("http://example.com"))
+        self.assertFalse(is_valid_concept_string("12345"))
+        self.assertFalse(is_valid_concept_string("this is an excessively long concept phrase that exceeds maximum word limit"))
+        
+        dummy_triples = [
+            {"head": "ایران", "relation": "IsA", "tail": "کشور", "weight": 2.0},
+            {"head": "ایران", "relation": "PartOf", "tail": "آسیا", "weight": 1.5},
+            {"head": "تهران", "relation": "IsA", "tail": "پایتخت", "weight": 1.0},
+            {"head": "England", "relation": "IsA", "tail": "country", "weight": 2.0},
+            {"head": "London", "relation": "IsA", "tail": "capital", "weight": 1.0},
+            {"head": "England", "relation": "PartOf", "tail": "Europe", "weight": 1.5},
+        ]
+        test_json = Path("exports/test_triples.json")
+        test_json.parent.mkdir(parents=True, exist_ok=True)
+        with open(test_json, "w", encoding="utf-8") as f:
+            json.dump(dummy_triples, f)
+            
+        selected = select_top_production_concepts([str(test_json)], total_quota=4, fa_quota=2, en_quota=2)
+        self.assertEqual(len(selected), 4)
+        
+        if test_json.exists():
+            test_json.unlink()
+
 if __name__ == "__main__":
     unittest.main()

@@ -53,6 +53,9 @@ def normalize_concept_text(text: str, lang: str = "fa") -> str:
         
     return text.strip()
 
+# Alias for backwards compatibility
+normalize_text = normalize_concept_text
+
 def clean_knowledge_graph(triples: List[Dict], min_weight: float = 1.0) -> List[Dict]:
     """Cleans raw assertions and maps relations to canonical ontology."""
     cleaned_map: Dict[Tuple[str, str, str], Dict] = {}

@@ -109,12 +109,6 @@ CANONICAL_RELATIONS: Dict[str, Dict] = {
         "fa": "تاثیرپذیر_از",
         "category": "relational",
         "description": "Influence or dependency (e.g. Earth climate influenced by sun)"
-    },
-    "RelatesTo": {
-        "en": "relates to",
-        "fa": "مرتبط_با",
-        "category": "general",
-        "description": "General associative relationship (e.g. Relativity relates to Spacetime)"
     }
 }
 
@@ -159,9 +153,9 @@ RELATION_ALIAS_MAP: Dict[str, str] = {
     "similar_to": "SimilarTo",
     "synonym": "Synonym",
     "antonym": "Antonym",
-    "relatedto": "RelatesTo",
-    "relatesto": "RelatesTo",
     "distinctfrom": "Antonym",
+    "influencedby": "InfluencedBy",
+    "influenced_by": "InfluencedBy",
     # Persian aliases
     "نوعی_از": "IsA",
     "بخشی_از": "PartOf",
@@ -173,7 +167,7 @@ RELATION_ALIAS_MAP: Dict[str, str] = {
     "پیش‌نیاز": "HasPrerequisite",
     "مترادف": "Synonym",
     "متضاد": "Antonym",
-    "مرتبط_با": "RelatesTo",
+    "تاثیرپذیر_از": "InfluencedBy",
 }
 
 def canonicalize_relation(raw_rel: str) -> str:

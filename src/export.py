@@ -158,18 +158,36 @@ def run_production_export(checkpoint_dir: Path, data_files: list, output_dir: Pa
     # 2. Relations Ontology Metadata
     export_relations_metadata(output_dir / "relations_ontology.json")
     
-    # 3. Concept Pre-encoding (in chunks)
+    # 3. Concept Pre-encoding on GPU (in high-throughput batches)
     concepts = collect_unique_concepts(data_files)
     if len(concepts) > 0:
-        print(f"Pre-encoding {len(concepts):,} unique concepts in batches...")
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"\nPre-encoding {len(concepts):,} unique concepts on {device} (Batch size: 2048)...")
+        
+        model.to(device)
+        if torch.cuda.device_count() > 1:
+            model = torch.nn.DataParallel(model)
+            
         all_embeddings = []
-        chunk_size = 256
+        chunk_size = 2048 if torch.cuda.is_available() else 256
+        
+        from tqdm import tqdm
+        pbar = tqdm(total=len(concepts), desc="Encoding Concepts", unit="concept")
+        
         for i in range(0, len(concepts), chunk_size):
             batch = concepts[i:i + chunk_size]
             inputs = tokenizer(batch, padding=True, truncation=True, max_length=64, return_tensors="pt")
-            with torch.no_grad():
-                emb = model.encode(inputs["input_ids"], inputs["attention_mask"]).numpy()
+            input_ids = inputs["input_ids"].to(device)
+            attention_mask = inputs["attention_mask"].to(device)
+            
+            with torch.inference_mode(), torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
+                raw_m = model.module if hasattr(model, "module") else model
+                emb = raw_m.encode(input_ids, attention_mask).float().cpu().numpy()
                 all_embeddings.append(emb)
+                
+            pbar.update(len(batch))
+            
+        pbar.close()
         embeddings = np.vstack(all_embeddings)
             
         export_concepts_to_rust_binary(

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-High-Precision Knowledge Graph Cleaner with Canonical Relation Filtering.
+High-Precision Knowledge Graph Cleaner with Canonical Relation Filtering & Bidirectional Inverses.
 Filters assertions to ensure:
-  1. Only canonical relations (IsA, PartOf, HasProperty, UsedFor, etc.) are preserved.
-  2. Persian text is standardized (Arabic characters -> Persian, ZWNJ normalization).
-  3. ConceptNet noisy suffixes and self-loops are purged.
-  4. Deduplicates assertions preserving maximum weight.
+  1. Only canonical relations (32 categories) are preserved.
+  2. Generates bidirectional inverse relations automatically.
+  3. Persian text is standardized (Arabic characters -> Persian, ZWNJ normalization).
+  4. ConceptNet noisy suffixes, self-loops, and duplicates are purged.
 """
 
 import sys
@@ -21,9 +21,17 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 try:
-    from src.data.relations import canonicalize_relation, CANONICAL_RELATION_NAMES
+    from src.data.relations import (
+        canonicalize_relation,
+        get_inverse_relation,
+        CANONICAL_RELATION_NAMES
+    )
 except ImportError:
-    from relations import canonicalize_relation, CANONICAL_RELATION_NAMES
+    from relations import (
+        canonicalize_relation,
+        get_inverse_relation,
+        CANONICAL_RELATION_NAMES
+    )
 
 PERSIAN_CHAR_MAP = {
     'ي': 'ی',
@@ -56,8 +64,10 @@ def normalize_concept_text(text: str, lang: str = "fa") -> str:
 # Alias for backwards compatibility
 normalize_text = normalize_concept_text
 
-def clean_knowledge_graph(triples: List[Dict], min_weight: float = 1.0) -> List[Dict]:
-    """Cleans raw assertions and maps relations to canonical ontology."""
+def clean_knowledge_graph(triples: List[Dict], min_weight: float = 1.0, generate_inverses: bool = True) -> List[Dict]:
+    """
+    Cleans raw assertions, maps to canonical relations, and generates bidirectional inverse links.
+    """
     cleaned_map: Dict[Tuple[str, str, str], Dict] = {}
     
     for item in triples:
@@ -83,15 +93,30 @@ def clean_knowledge_graph(triples: List[Dict], min_weight: float = 1.0) -> List[
         if len(head) > 50 or len(tail) > 50:
             continue
             
-        key = (head, canonical_rel, tail)
-        if key not in cleaned_map or weight > cleaned_map[key]["weight"]:
-            cleaned_map[key] = {
+        # 1. Forward Triple
+        forward_key = (head, canonical_rel, tail)
+        if forward_key not in cleaned_map or weight > cleaned_map[forward_key]["weight"]:
+            cleaned_map[forward_key] = {
                 "head": head,
                 "relation": canonical_rel,
                 "tail": tail,
                 "lang": lang,
                 "weight": weight
             }
+            
+        # 2. Bidirectional Inverse Triple
+        if generate_inverses:
+            inv_rel = get_inverse_relation(canonical_rel)
+            if inv_rel and inv_rel in CANONICAL_RELATION_NAMES:
+                inverse_key = (tail, inv_rel, head)
+                if inverse_key not in cleaned_map or weight > cleaned_map[inverse_key]["weight"]:
+                    cleaned_map[inverse_key] = {
+                        "head": tail,
+                        "relation": inv_rel,
+                        "tail": head,
+                        "lang": lang,
+                        "weight": weight
+                    }
             
     return list(cleaned_map.values())
 
@@ -103,14 +128,14 @@ def clean_dataset_file(input_path: Path, output_path: Path, min_weight: float = 
     with open(input_path, "r", encoding="utf-8") as f:
         raw_data = json.load(f)
         
-    print(f"Loaded {len(raw_data):,} raw assertions. Cleaning and filtering to canonical relations...")
-    cleaned = clean_knowledge_graph(raw_data, min_weight=min_weight)
+    print(f"Loaded {len(raw_data):,} raw assertions. Cleaning, generating inverses, and mapping to 32 canonical relations...")
+    cleaned = clean_knowledge_graph(raw_data, min_weight=min_weight, generate_inverses=True)
     
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(cleaned, f, ensure_ascii=False, indent=2)
         
     print("=" * 65)
-    print(f"[CLEAN COMPLETE] {len(raw_data):,} raw -> {len(cleaned):,} canonical assertions.")
+    print(f"[CLEAN COMPLETE] {len(raw_data):,} raw -> {len(cleaned):,} canonical bidirectional assertions.")
     print(f"Saved to: {output_path} ({output_path.stat().st_size / 1024 / 1024:.1f} MB)")
     print("=" * 65)
     return len(cleaned)
@@ -118,8 +143,8 @@ def clean_dataset_file(input_path: Path, output_path: Path, min_weight: float = 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Clean and Canonicalize Knowledge Graph Data")
     parser.add_argument("--input", type=str, default="data/raw/conceptnet_subset.json", help="Raw dataset path")
-    parser.add_argument("--output", type=str, default="data/raw/conceptnet_clean.json", help="Cleaned dataset path")
-    parser.add_argument("--min-weight", type=float, default=1.0, help="Minimum assertion weight")
+    parser.add_argument("--output", type=str, default="data/raw/conceptnet_clean.json", help="Clean dataset output path")
+    parser.add_argument("--min-weight", type=float, default=1.0, help="Minimum assertion confidence weight")
     args = parser.parse_args()
-
+    
     clean_dataset_file(Path(args.input), Path(args.output), min_weight=args.min_weight)

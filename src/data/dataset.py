@@ -1,8 +1,18 @@
+import sys
 import json
 import torch
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional
 from torch.utils.data import Dataset
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+try:
+    from src.data.relations import format_verbalizer_prompt
+except ImportError:
+    from relations import format_verbalizer_prompt
 
 class SimKGCDataset(Dataset):
     """
@@ -31,7 +41,8 @@ class SimKGCDataset(Dataset):
 
 class SimKGCCollator:
     """
-    Collates raw string triplets into tokenized PyTorch tensors for head-relation and tail.
+    Collates raw string triplets into tokenized PyTorch tensors.
+    Uses fluent natural language verbalizer prompts (e.g. 'ایران نوعی از' / 'Iran is a type of').
     Optionally attaches teacher concept target indices for zero-overhead distillation.
     """
     
@@ -39,10 +50,9 @@ class SimKGCCollator:
         self.tokenizer = tokenizer
         self.max_seq_length = max_seq_length
         self.concept_to_idx = concept_to_idx
-        self.sep_token = tokenizer.sep_token if tokenizer.sep_token else "[SEP]"
 
     def __call__(self, batch: List[Tuple[str, str, str]]) -> Dict[str, torch.Tensor]:
-        hr_texts = [f"{head} {self.sep_token} {relation}" for head, relation, _ in batch]
+        hr_texts = [format_verbalizer_prompt(head, relation) for head, relation, _ in batch]
         tail_texts = [tail for _, _, tail in batch]
         
         hr_encodings = self.tokenizer(

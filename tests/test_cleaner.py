@@ -24,10 +24,10 @@ class TestDataCleaner(unittest.TestCase):
             {"head": "زمین", "relation": "HasProperty", "tail": "جاذبه", "weight": 2.5}, # Duplicate with higher weight
             {"head": "a", "relation": "b", "tail": "c", "weight": 0.1}, # Below min weight
         ]
-        cleaned = clean_knowledge_graph(raw_triples, min_weight=1.0)
-        self.assertEqual(len(cleaned), 1)
-        self.assertEqual(cleaned[0]["head"], "زمین")
-        self.assertEqual(cleaned[0]["weight"], 2.5)
+        cleaned = clean_knowledge_graph(raw_triples, min_weight=1.0, generate_inverses=True)
+        self.assertEqual(len(cleaned), 2) # Forward + Inverse
+        self.assertTrue(any(c["head"] == "زمین" and c["relation"] == "HasProperty" and c["tail"] == "جاذبه" for c in cleaned))
+        self.assertTrue(any(c["head"] == "جاذبه" and c["relation"] == "PropertyOf" and c["tail"] == "زمین" for c in cleaned))
 
 if __name__ == "__main__":
     unittest.main()

@@ -6,6 +6,7 @@ Filters assertions to ensure:
   2. Generates bidirectional inverse relations automatically.
   3. Persian text is standardized (Arabic characters -> Persian, ZWNJ normalization).
   4. ConceptNet noisy suffixes, self-loops, and duplicates are purged.
+  5. Supports merging multiple raw/synthetic datasets in one unified pass.
 """
 
 import sys
@@ -75,7 +76,7 @@ def clean_knowledge_graph(triples: List[Dict], min_weight: float = 1.0, generate
         rel_raw = item.get("relation", "")
         tail_raw = item.get("tail", "")
         lang = item.get("lang", "en")
-        weight = float(item.get("weight", 1.0))
+        weight = float(item.get("weight", 2.0))
         
         if weight < min_weight:
             continue
@@ -120,31 +121,46 @@ def clean_knowledge_graph(triples: List[Dict], min_weight: float = 1.0, generate
             
     return list(cleaned_map.values())
 
-def clean_dataset_file(input_path: Path, output_path: Path, min_weight: float = 1.0) -> int:
-    """Reads raw JSON dataset in chunks, cleans and writes canonical dataset."""
+def clean_dataset_files(input_paths: List[Path], output_path: Path, min_weight: float = 1.0) -> int:
+    """Reads one or multiple JSON datasets, cleans, merges and writes canonical dataset."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    print(f"Reading raw dataset from {input_path}...")
+    all_raw = []
     
-    with open(input_path, "r", encoding="utf-8") as f:
-        raw_data = json.load(f)
-        
-    print(f"Loaded {len(raw_data):,} raw assertions. Cleaning, generating inverses, and mapping to 32 canonical relations...")
-    cleaned = clean_knowledge_graph(raw_data, min_weight=min_weight, generate_inverses=True)
+    for inp in input_paths:
+        p = Path(inp)
+        if not p.exists():
+            print(f"[Warning] Input file {p} does not exist, skipping.")
+            continue
+        print(f"Reading dataset: {p}...")
+        with open(p, "r", encoding="utf-8") as f:
+            try:
+                data = json.load(f)
+                all_raw.extend(data)
+                print(f"  -> Loaded {len(data):,} assertions from {p.name}")
+            except Exception as e:
+                print(f"  -> Error loading {p}: {e}")
+                
+    print(f"\nTotal loaded: {len(all_raw):,} raw assertions across {len(input_paths)} files.")
+    print("Cleaning, deduplicating, generating inverses, and mapping to 32 canonical relations...")
+    cleaned = clean_knowledge_graph(all_raw, min_weight=min_weight, generate_inverses=True)
     
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(cleaned, f, ensure_ascii=False, indent=2)
         
     print("=" * 65)
-    print(f"[CLEAN COMPLETE] {len(raw_data):,} raw -> {len(cleaned):,} canonical bidirectional assertions.")
+    print(f"[CLEAN COMPLETE] {len(all_raw):,} raw -> {len(cleaned):,} canonical bidirectional assertions.")
     print(f"Saved to: {output_path} ({output_path.stat().st_size / 1024 / 1024:.1f} MB)")
     print("=" * 65)
     return len(cleaned)
 
+# Alias
+clean_dataset_file = lambda inp, out, min_weight=1.0: clean_dataset_files([inp], out, min_weight)
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Clean and Canonicalize Knowledge Graph Data")
-    parser.add_argument("--input", type=str, default="data/raw/conceptnet_subset.json", help="Raw dataset path")
+    parser = argparse.ArgumentParser(description="Clean, Canonicalize, and Merge Knowledge Graph Datasets")
+    parser.add_argument("--input", nargs="+", default=["data/raw/conceptnet_subset.json", "data/synthetic/all_triplets_deduped.json"], help="Input dataset path(s)")
     parser.add_argument("--output", type=str, default="data/raw/conceptnet_clean.json", help="Clean dataset output path")
-    parser.add_argument("--min-weight", type=float, default=1.0, help="Minimum assertion confidence weight")
+    parser.add_argument("--min-weight", type=float, default=0.5, help="Minimum assertion confidence weight")
     args = parser.parse_args()
     
-    clean_dataset_file(Path(args.input), Path(args.output), min_weight=args.min_weight)
+    clean_dataset_files([Path(p) for p in args.input], Path(args.output), min_weight=args.min_weight)

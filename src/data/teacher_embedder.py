@@ -2,7 +2,7 @@
 """
 Teacher Embedder for SimKGC Pipeline.
 Uses BAAI/bge-m3 (560M parameters) to pre-encode concept terms into high-quality
-256-dimensional normalized vectors for distillation and production export.
+256-dimensional normalized vectors with incremental disk persistence and resume support.
 """
 
 import os
@@ -46,81 +46,122 @@ def extract_bge_teacher_embeddings(
     device: Optional[torch.device] = None
 ) -> np.ndarray:
     """
-    Encodes unique concepts using BGE-M3 on GPU and saves the 256-d target matrix.
+    Encodes unique concepts using BGE-M3 on GPU.
+    Streams embeddings directly to disk with np.memmap so progress is continuously persisted.
     """
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
-    print(f"\n[Teacher Embedder] Loading Teacher Model: {teacher_model_name} on {device}...")
-    tokenizer = AutoTokenizer.from_pretrained(teacher_model_name)
-    model = AutoModel.from_pretrained(teacher_model_name)
-    model.eval()
-    model.to(device)
-    
-    projector = BGEConceptProjector(input_dim=model.config.hidden_size, output_dim=output_dim)
-    projector.eval()
-    projector.to(device)
-    
-    if torch.cuda.device_count() > 1:
-        print(f"[Teacher Embedder] Using {torch.cuda.device_count()} GPUs with DataParallel.")
-        model = nn.DataParallel(model)
-        projector = nn.DataParallel(projector)
-        
+    output_npy_path = Path(output_npy_path)
+    output_dict_path = Path(output_dict_path)
     output_npy_path.parent.mkdir(parents=True, exist_ok=True)
     output_dict_path.parent.mkdir(parents=True, exist_ok=True)
     
-    print(f"[Teacher Embedder] Pre-encoding {len(concepts):,} concepts in batches of {batch_size}...")
-    all_embeddings = []
+    total_concepts = len(concepts)
+    temp_dat_path = output_npy_path.with_suffix(".mmap.dat")
+    progress_file = output_npy_path.parent / "teacher_embed_progress.json"
     
-    pbar = tqdm(total=len(concepts), desc="BGE-M3 Concept Encoding", unit="concept")
-    
-    for i in range(0, len(concepts), batch_size):
-        chunk = concepts[i:i + batch_size]
-        inputs = tokenizer(
-            chunk,
-            padding=True,
-            truncation=True,
-            max_length=64,
-            return_tensors="pt"
-        )
-        input_ids = inputs["input_ids"].to(device)
-        attention_mask = inputs["attention_mask"].to(device)
+    start_idx = 0
+    # Check for existing resumable progress
+    if temp_dat_path.exists() and progress_file.exists():
+        try:
+            with open(progress_file, "r", encoding="utf-8") as f:
+                pdata = json.load(f)
+            if pdata.get("total") == total_concepts:
+                start_idx = pdata.get("completed_count", 0)
+                print(f"[Teacher Embedder] Resuming existing progress: {start_idx:,}/{total_concepts:,} concepts already saved.")
+        except Exception:
+            start_idx = 0
+
+    mode = "r+" if temp_dat_path.exists() and start_idx > 0 else "w+"
+    mmap_matrix = np.memmap(
+        str(temp_dat_path),
+        dtype=np.float32,
+        mode=mode,
+        shape=(total_concepts, output_dim)
+    )
+
+    if start_idx >= total_concepts:
+        print(f"[Teacher Embedder] All {total_concepts:,} concepts already completed on disk!")
+    else:
+        print(f"\n[Teacher Embedder] Loading Teacher Model: {teacher_model_name} on {device}...")
+        tokenizer = AutoTokenizer.from_pretrained(teacher_model_name)
+        model = AutoModel.from_pretrained(teacher_model_name)
+        model.eval()
+        model.to(device)
         
-        with torch.inference_mode(), torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
-            outputs = model(input_ids=input_ids, attention_mask=attention_mask)
-            # Attention-masked mean pooling
-            mask_expanded = attention_mask.unsqueeze(-1).expand(outputs.last_hidden_state.size()).float()
-            sum_emb = torch.sum(outputs.last_hidden_state * mask_expanded, dim=1)
-            sum_mask = torch.clamp(mask_expanded.sum(dim=1), min=1e-9)
-            pooled = sum_emb / sum_mask
-            
-            # Project to 256-d normalized space
-            proj_emb = projector(pooled)
-            all_embeddings.append(proj_emb.float().cpu().numpy())
-            
-        pbar.update(len(chunk))
+        projector = BGEConceptProjector(input_dim=model.config.hidden_size, output_dim=output_dim)
+        projector.eval()
+        projector.to(device)
         
-    pbar.close()
+        if torch.cuda.device_count() > 1:
+            print(f"[Teacher Embedder] Using {torch.cuda.device_count()} GPUs with DataParallel.")
+            model = nn.DataParallel(model)
+            projector = nn.DataParallel(projector)
+            
+        print(f"[Teacher Embedder] Encoding {total_concepts - start_idx:,} remaining concepts (Batch size: {batch_size})...")
+        pbar = tqdm(total=total_concepts, initial=start_idx, desc="BGE-M3 Concept Encoding", unit="concept")
+        
+        for i in range(start_idx, total_concepts, batch_size):
+            chunk = concepts[i:i + batch_size]
+            inputs = tokenizer(
+                chunk,
+                padding=True,
+                truncation=True,
+                max_length=64,
+                return_tensors="pt"
+            )
+            input_ids = inputs["input_ids"].to(device)
+            attention_mask = inputs["attention_mask"].to(device)
+            
+            with torch.inference_mode(), torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
+                outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+                # Attention-masked mean pooling
+                mask_expanded = attention_mask.unsqueeze(-1).expand(outputs.last_hidden_state.size()).float()
+                sum_emb = torch.sum(outputs.last_hidden_state * mask_expanded, dim=1)
+                sum_mask = torch.clamp(mask_expanded.sum(dim=1), min=1e-9)
+                pooled = sum_emb / sum_mask
+                
+                # Project to 256-d normalized space
+                proj_emb = projector(pooled)
+                mmap_matrix[i:i + len(chunk)] = proj_emb.float().cpu().numpy()
+                
+            pbar.update(len(chunk))
+            
+            # Flush to disk every 10,000 concepts to guarantee persistence against connection drops
+            current_done = i + len(chunk)
+            if current_done % 10000 == 0 or current_done == total_concepts:
+                mmap_matrix.flush()
+                with open(progress_file, "w", encoding="utf-8") as f:
+                    json.dump({"completed_count": current_done, "total": total_concepts}, f)
+                    
+        pbar.close()
+
+    # Finalize: flush and copy to permanent .npy file
+    mmap_matrix.flush()
+    print(f"\n[Teacher Embedder] Finalizing persistent array to: {output_npy_path}...")
+    np.save(output_npy_path, np.array(mmap_matrix))
     
-    embeddings = np.vstack(all_embeddings).astype(np.float32)
-    print(f"[Teacher Embedder] Finished encoding. Output shape: {embeddings.shape}")
-    
-    # Save target array and concept-to-index mapping
-    np.save(output_npy_path, embeddings)
     with open(output_dict_path, "w", encoding="utf-8") as f:
         json.dump(concepts, f, ensure_ascii=False, indent=2)
         
-    print(f"[Teacher Embedder] Saved targets to {output_npy_path} ({output_npy_path.stat().st_size / (1024 * 1024):.2f} MB)")
+    # Clean up temporary progress tracker and temp mmap
+    if progress_file.exists():
+        progress_file.unlink()
+    if temp_dat_path.exists():
+        temp_dat_path.unlink()
+        
+    print(f"[Teacher Embedder] Saved target array to {output_npy_path} ({output_npy_path.stat().st_size / (1024 * 1024):.2f} MB)")
     print(f"[Teacher Embedder] Saved dictionary to {output_dict_path}")
-    return embeddings
+    return np.load(output_npy_path)
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="Extract BGE-M3 Teacher Embeddings for Concepts")
+    parser = argparse.ArgumentParser(description="Extract BGE-M3 Teacher Embeddings with Resumable Disk Persistence")
     parser.add_argument("--data", default="data/raw/conceptnet_clean.json", help="Path to cleaned dataset")
     parser.add_argument("--out-npy", default="cache/bge_m3_concept_targets.npy", help="Output .npy path")
     parser.add_argument("--out-dict", default="cache/concepts_dict.json", help="Output concepts JSON path")
-    parser.add_argument("--batch-size", type=int, default=1024, help="Batch size for GPU inference")
+    parser.add_argument("--batch-size", type=int, default=2048, help="Batch size for GPU inference")
     parser.add_argument("--max-concepts", type=int, default=None, help="Optional concept limit")
     args = parser.parse_args()
     

@@ -33,10 +33,10 @@ def run_cmd(cmd: str) -> str:
     return (res.stdout or res.stderr).strip()
 
 def push_kernel():
-    print(f"[*] Pushing kernel '{KERNEL_ID}' to Kaggle cloud on GPU T4 x2...")
-    out = run_cmd("kaggle kernels push -a gpuT4x2")
+    print(f"[*] Pushing new kernel version for '{KERNEL_ID}' to Kaggle cloud...")
+    out = run_cmd("kaggle kernels push -p .")
     print(out)
-    print("\n✓ Cloud GPU (T4 x2) training started on Kaggle!")
+    print("\n[OK] Cloud GPU (T4 x2) training started on Kaggle!")
     print(f"Live web console: https://www.kaggle.com/code/{KERNEL_ID}")
     print("Run: python scripts/kaggle_watch.py watch  (to stream live terminal logs)")
 
@@ -81,7 +81,7 @@ def stream_logs(interval: int = 5):
                 pass
 
             if "complete" in status.lower():
-                print(f"\n\n[✓ COMPLETED] Cloud job finished successfully!")
+                print(f"\n\n[OK] Cloud job finished successfully!")
                 print(f"All models & exports uploaded to: https://huggingface.co/Celestios/Persian-simkgc-256d")
                 break
             elif "error" in status.lower() or "failed" in status.lower() or "cancel" in status.lower():

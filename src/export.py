@@ -21,8 +21,9 @@ from collections import defaultdict
 
 try:
     import torch
+    import torch.nn as nn
 except ImportError:
-    torch = None
+    torch = nn = None
 
 try:
     import numpy as np
@@ -42,8 +43,9 @@ if str(REPO_ROOT) not in sys.path:
 
 try:
     from src.model.biencoder import SimKGCBiEncoder
+    from src.model.modular_encoder import TextEmbedder, RelationalCore, AssembledBiEncoder
 except (ImportError, ModuleNotFoundError):
-    SimKGCBiEncoder = None
+    SimKGCBiEncoder = TextEmbedder = RelationalCore = AssembledBiEncoder = None
 
 try:
     from src.data.relations import CANONICAL_RELATIONS, is_persian_text
@@ -51,21 +53,37 @@ except (ImportError, ModuleNotFoundError):
     CANONICAL_RELATIONS = {}
     is_persian_text = lambda x: False
 
+def quantize_int8_matrix(matrix: np.ndarray) -> Tuple[np.ndarray, bytes]:
+    """Quantizes float32 matrix (-1.0 to 1.0) to INT8 [-127, 127] bytes."""
+    clipped = np.clip(np.round(matrix * 127.0), -127, 127).astype(np.int8)
+    return clipped, clipped.tobytes()
+
+def write_ckge_binary(file_path: Path, matrix: np.ndarray, num_items: int, dim: int, quantize_int8: bool = True) -> int:
+    """Writes CKGE binary struct header and payload to disk."""
+    magic = b"CKGE"
+    precision = 1 if quantize_int8 else 0
+    header = struct.pack("<4sIII", magic, num_items, dim, precision)
+    
+    if quantize_int8:
+        _, payload = quantize_int8_matrix(matrix)
+    else:
+        payload = matrix.astype(np.float32).tobytes()
+        
+    with open(file_path, "wb") as f:
+        f.write(header)
+        f.write(payload)
+        
+    return file_path.stat().st_size
+
 def is_valid_concept_string(text: str) -> bool:
-    """
-    Lexical quality filter to discard noise, URLs, long conversational text, and pure digits.
-    """
+    """Lexical quality filter to discard noise, URLs, long conversational text, and pure digits."""
     t = text.strip()
     if len(t) < 2 or len(t) > 45:
         return False
-    # Max 4 words
-    words = t.split()
-    if len(words) > 4:
+    if len(t.split()) > 4:
         return False
-    # Drop pure numbers
     if t.isdigit() or t.replace(".", "", 1).isdigit():
         return False
-    # Drop URLs and markdown artifacts
     if "http" in t or "www." in t or "[" in t or "]" in t or "{" in t or "}" in t:
         return False
     return True
@@ -122,67 +140,130 @@ def select_top_production_concepts(
         else:
             scored_en.append((score, concept))
             
-    scored_fa.sort(key=lambda x: x[0], reverse=True)
-    scored_en.sort(key=lambda x: x[0], reverse=True)
+    scored_fa.sort(reverse=True)
+    scored_en.sort(reverse=True)
     
     print(f"[Concept Curator] Found {len(scored_fa):,} valid Persian and {len(scored_en):,} valid English candidates.")
     
-    selected_fa = [c for _, c in scored_fa[:fa_quota]]
-    selected_en = [c for _, c in scored_en[:en_quota]]
+    top_fa = [c for _, c in scored_fa[:fa_quota]]
+    top_en = [c for _, c in scored_en[:en_quota]]
     
-    combined = selected_fa + selected_en
-    # If one language fell short of quota, backfill from remaining pool
-    if len(combined) < total_quota:
-        remaining_fa = [c for _, c in scored_fa[fa_quota:]]
-        remaining_en = [c for _, c in scored_en[en_quota:]]
-        all_remaining = sorted(remaining_fa + remaining_en, key=lambda x: degrees[x], reverse=True)
-        combined.extend(all_remaining[:total_quota - len(combined)])
+    # If one language has fewer candidates than quota, backfill from the other
+    if len(top_fa) < fa_quota:
+        remaining = total_quota - len(top_fa)
+        top_en = [c for _, c in scored_en[:remaining]]
+    elif len(top_en) < en_quota:
+        remaining = total_quota - len(top_en)
+        top_fa = [c for _, c in scored_fa[:remaining]]
         
-    print(f"[Concept Curator] Curated exactly {len(combined):,} top concepts:")
-    print(f"  - Persian: {len(selected_fa):,} concepts")
-    print(f"  - English: {len(selected_en):,} concepts")
+    final_concepts = top_fa + top_en
+    print(f"[Concept Curator] Curated exactly {len(final_concepts):,} top concepts:")
+    print(f"  - Persian: {len(top_fa):,} concepts")
+    print(f"  - English: {len(top_en):,} concepts")
     
-    return combined
+    return final_concepts
 
-def export_relations_metadata(output_path: Path):
-    """Exports canonical relations metadata for Centrode Flutter/Rust UI."""
-    with open(output_path, "w", encoding="utf-8") as f:
+def export_relations_metadata(output_json_path: Path):
+    """Exports canonical ontology relations to JSON metadata file."""
+    output_json_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_json_path, "w", encoding="utf-8") as f:
         json.dump(CANONICAL_RELATIONS, f, ensure_ascii=False, indent=2)
-    print(f"[OK] Exported relations ontology metadata to: {output_path}")
+    print(f"[OK] Exported {len(CANONICAL_RELATIONS)} canonical relations ontology to: {output_json_path}")
+
+class ONNXExportWrapper(nn.Module):
+    """Wraps model for standard ONNX single-tower text encoding: (input_ids, attention_mask) -> 256-d."""
+    def __init__(self, model: nn.Module):
+        super().__init__()
+        self.model = model
+        
+    def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+        if hasattr(self.model, "encode"):
+            return self.model.encode(input_ids, attention_mask)
+        elif hasattr(self.model, "text_embedder"):
+            return self.model.encode(input_ids, attention_mask)
+        else:
+            return self.model(input_ids, attention_mask)
+
+def export_to_onnx(model: nn.Module, tokenizer, output_onnx_path: Path, max_length: int = 64):
+    """Exports model to standard ONNX graph with dynamic axes."""
+    output_onnx_path.parent.mkdir(parents=True, exist_ok=True)
+    model.eval()
+    
+    wrapper = ONNXExportWrapper(model)
+    wrapper.eval()
+    
+    dummy_text = "دانشگاه تهران"
+    dummy_inputs = tokenizer(
+        dummy_text,
+        padding="max_length",
+        truncation=True,
+        max_length=max_length,
+        return_tensors="pt"
+    )
+    
+    input_ids = dummy_inputs["input_ids"]
+    attention_mask = dummy_inputs["attention_mask"]
+    
+    print(f"\n[ONNX Exporter] Exporting PyTorch model to ONNX: {output_onnx_path}...")
+    torch.onnx.export(
+        wrapper,
+        (input_ids, attention_mask),
+        str(output_onnx_path),
+        input_names=["input_ids", "attention_mask"],
+        output_names=["embedding"],
+        dynamic_axes={
+            "input_ids": {0: "batch_size", 1: "sequence_length"},
+            "attention_mask": {0: "batch_size", 1: "sequence_length"},
+            "embedding": {0: "batch_size"}
+        },
+        opset_version=17,
+        do_constant_folding=True
+    )
+    print(f"[OK] ONNX model exported ({output_onnx_path.stat().st_size / 1024 / 1024:.2f} MB)")
+
+def quantize_onnx_to_int8(input_onnx_path: Path, output_quant_path: Path):
+    """Dynamically quantizes ONNX model to INT8 precision."""
+    if quantize_dynamic is None:
+        print("[WARNING] onnxruntime.quantization not available. Skipping quantization.")
+        return
+        
+    print(f"\n[Quantizer] Quantizing ONNX model to INT8: {output_quant_path}...")
+    quantize_dynamic(
+        model_input=str(input_onnx_path),
+        model_output=str(output_quant_path),
+        weight_type=QuantType.QInt8
+    )
+    print(f"[OK] INT8 Quantized ONNX model exported ({output_quant_path.stat().st_size / 1024 / 1024:.2f} MB)")
 
 def export_relations_matrix(
-    data_files: list,
-    concept_matrix: Optional[np.ndarray],
-    concepts_list: Optional[List[str]],
-    model: Optional[SimKGCBiEncoder],
+    data_files: List[str],
+    concept_matrix: np.ndarray,
+    concepts_list: List[str],
+    model: nn.Module,
     tokenizer,
     output_bin_path: Path,
     output_meta_path: Path,
-    device: Optional[object] = None
+    output_dim: int = 256
 ):
     """
-    Computes exact empirical translation offset vectors (v_tail - v_head) for all 32 relations.
-    Guarantees that (v_head + r_rel) lands directly in the true tail cluster without text bias.
+    Computes empirical translation offset vectors r_rel for all canonical relations.
+    Fixes CUDA/CPU device migration safely.
     """
-    if device is None and torch is not None:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
+    print(f"\n[Relations Exporter] Computing exact empirical offset vectors...")
     output_bin_path.parent.mkdir(parents=True, exist_ok=True)
-    relation_names = sorted(list(CANONICAL_RELATIONS.keys()))
-    dim = 256
+    output_meta_path.parent.mkdir(parents=True, exist_ok=True)
     
-    # 1. Build Concept -> Vector lookup map
-    c_to_vec = {}
-    if concept_matrix is not None and concepts_list is not None:
-        for i, c in enumerate(concepts_list):
-            c_to_vec[c] = concept_matrix[i]
-            
-    # 2. Accumulate empirical displacement vectors: delta = v_tail - v_head
-    rel_accumulators = {r: np.zeros(dim, dtype=np.float32) for r in relation_names}
-    rel_counts = {r: 0 for r in relation_names}
-    
-    for fpath in data_files:
-        p = Path(fpath)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if model is not None:
+        model.to(device)
+        model.eval()
+
+    c_to_idx = {c: i for i, c in enumerate(concepts_list)}
+    relation_keys = sorted(list(CANONICAL_RELATIONS.keys()))
+    rel_displacements = defaultdict(list)
+
+    for path_str in data_files:
+        p = Path(path_str)
         if not p.exists():
             continue
         with open(p, "r", encoding="utf-8") as f:
@@ -191,108 +272,46 @@ def export_relations_matrix(
                 h = item.get("head", "").strip()
                 t = item.get("tail", "").strip()
                 r = item.get("relation", "").strip()
-                if r in rel_accumulators and h in c_to_vec and t in c_to_vec:
-                    vh = c_to_vec[h]
-                    vt = c_to_vec[t]
-                    disp = vt - vh
-                    norm = np.linalg.norm(disp)
-                    if norm > 1e-6:
-                        rel_accumulators[r] += disp / norm
-                        rel_counts[r] += 1
-                        
-    rel_vectors = []
-    for r in relation_names:
-        vec = rel_accumulators[r]
-        count = rel_counts[r]
-        if count >= 3:
-            # Normalize empirical mean displacement
-            norm = np.linalg.norm(vec)
-            unit_vec = vec / max(norm, 1e-9)
+                
+                if h in c_to_idx and t in c_to_idx and r in CANONICAL_RELATIONS:
+                    vh = concept_matrix[c_to_idx[h]]
+                    vt = concept_matrix[c_to_idx[t]]
+                    diff = vt - vh
+                    rel_displacements[r].append(diff)
+
+    final_rel_matrix = np.zeros((len(relation_keys), output_dim), dtype=np.float32)
+
+    for i, r_name in enumerate(relation_keys):
+        if len(rel_displacements[r_name]) > 0:
+            avg_disp = np.mean(rel_displacements[r_name], axis=0)
+            norm = np.linalg.norm(avg_disp)
+            if norm > 1e-6:
+                final_rel_matrix[i] = avg_disp / norm
         else:
-            # Fallback: differential template encoding
-            if model is not None and tokenizer is not None and torch is not None:
-                raw_m = model.module if hasattr(model, "module") else model
-                raw_m.eval()
-                template = CANONICAL_RELATIONS[r].get("en_template", f"{{head}} {r}").format(head="[ENTITY]")
-                inputs = tokenizer([template, "[ENTITY]"], padding=True, truncation=True, max_length=64, return_tensors="pt")
-                with torch.inference_mode():
-                    embs = raw_m.encode(inputs["input_ids"].to(device), inputs["attention_mask"].to(device)).float().cpu().numpy()
-                disp = embs[0] - embs[1]
-                unit_vec = disp / max(np.linalg.norm(disp), 1e-9)
-            else:
-                unit_vec = np.random.randn(dim).astype(np.float32)
-                unit_vec /= np.linalg.norm(unit_vec)
-        rel_vectors.append(unit_vec)
-        
-    rel_matrix = np.vstack(rel_vectors).astype(np.float32)
-    num_rels, dim = rel_matrix.shape
+            # Fallback: encode template with model on active device
+            meta = CANONICAL_RELATIONS[r_name]
+            prompt = meta.get("en_template", "").format(head="concept")
+            if model is not None and tokenizer is not None:
+                inputs = tokenizer(prompt, return_tensors="pt", padding=True, truncation=True, max_length=64)
+                input_ids = inputs["input_ids"].to(device)
+                attention_mask = inputs["attention_mask"].to(device)
+                with torch.no_grad():
+                    if hasattr(model, "encode"):
+                        vec = model.encode(input_ids, attention_mask)[0].cpu().numpy()
+                    else:
+                        vec = model(input_ids, attention_mask)[0].cpu().numpy()
+                final_rel_matrix[i] = vec / max(np.linalg.norm(vec), 1e-9)
+
+    write_ckge_binary(output_bin_path, final_rel_matrix, len(relation_keys), output_dim, quantize_int8=True)
     
-    quantized_matrix = np.clip(np.round(rel_matrix * 127.0), -127, 127).astype(np.int8)
-    header = struct.pack("<4sIII", b"CKGE", num_rels, dim, 1)
-    
-    with open(output_bin_path, "wb") as f:
-        f.write(header)
-        f.write(quantized_matrix.tobytes())
-        
     with open(output_meta_path, "w", encoding="utf-8") as f:
         json.dump({
-            "num_relations": num_rels,
-            "dimension": dim,
-            "relations": relation_names,
-            "relation_counts": rel_counts,
-            "ontology": CANONICAL_RELATIONS
+            "num_relations": len(relation_keys),
+            "dim": output_dim,
+            "relations": relation_keys
         }, f, ensure_ascii=False, indent=2)
-        
-    print(f"[OK] Exported {num_rels} true translation offset vectors (32x256 INT8, {output_bin_path.stat().st_size} bytes) to:")
-    print(f"     Binary: {output_bin_path}")
-    print(f"     Ontology Meta: {output_meta_path}")
 
-def export_to_onnx(model: SimKGCBiEncoder, tokenizer, output_path: Path, max_length: int = 64):
-    """Exports PyTorch Bi-Encoder single forward query pass to ONNX."""
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    model.eval()
-    
-    dummy_text = "concept is a type of"
-    dummy_inputs = tokenizer(dummy_text, return_tensors="pt", max_length=max_length, padding="max_length", truncation=True)
-    dummy_input_ids = dummy_inputs["input_ids"]
-    dummy_attention_mask = dummy_inputs["attention_mask"]
-
-    class QueryEncoderWrapper(torch.nn.Module):
-        def __init__(self, biencoder):
-            super().__init__()
-            self.biencoder = biencoder
-        def forward(self, input_ids, attention_mask):
-            return self.biencoder.encode(input_ids, attention_mask)
-
-    wrapper = QueryEncoderWrapper(model)
-    print(f"Exporting PyTorch model to ONNX: {output_path}...")
-    
-    torch.onnx.export(
-        wrapper,
-        (dummy_input_ids, dummy_attention_mask),
-        str(output_path),
-        input_names=["input_ids", "attention_mask"],
-        output_names=["embedding"],
-        dynamic_axes={
-            "input_ids": {0: "batch_size", 1: "sequence_length"},
-            "attention_mask": {0: "batch_size", 1: "sequence_length"},
-            "embedding": {0: "batch_size"}
-        },
-        opset_version=14,
-        do_constant_folding=True,
-        dynamo=False
-    )
-    print(f"[OK] ONNX export complete ({output_path.stat().st_size / 1024 / 1024:.2f} MB)")
-
-def quantize_onnx_to_int8(input_onnx_path: Path, output_int8_path: Path):
-    """Quantizes ONNX weights to INT8 precision for ultra-fast CPU inference."""
-    print(f"Quantizing ONNX model to INT8: {output_int8_path}...")
-    quantize_dynamic(
-        model_input=str(input_onnx_path),
-        model_output=str(output_int8_path),
-        weight_type=QuantType.QInt8
-    )
-    print(f"[OK] INT8 Quantized ONNX saved ({output_int8_path.stat().st_size / 1024 / 1024:.2f} MB)")
+    print(f"[OK] Exported {len(relation_keys)} relation offset vectors to: {output_bin_path}")
 
 def export_concepts_to_rust_binary(
     concepts: List[str],
@@ -301,27 +320,13 @@ def export_concepts_to_rust_binary(
     dict_output_path: Path,
     quantize_int8: bool = True
 ):
-    """
-    Serializes pre-encoded concept matrix into flat binary buffer for zero-copy mmap in Rust.
-    Header: 'CKGE' [4s] + NumConcepts [u32] + Dim [u32] + Precision [u32] (16 bytes).
-    """
+    """Exports concept vectors and dictionary mapping."""
     bin_output_path.parent.mkdir(parents=True, exist_ok=True)
+    dict_output_path.parent.mkdir(parents=True, exist_ok=True)
+    
     num_concepts, dim = embeddings.shape
+    write_ckge_binary(bin_output_path, embeddings, num_concepts, dim, quantize_int8=quantize_int8)
     
-    if quantize_int8:
-        quantized_matrix = np.clip(np.round(embeddings * 127.0), -127, 127).astype(np.int8)
-        precision_code = 1
-        payload = quantized_matrix.tobytes()
-    else:
-        precision_code = 4
-        payload = embeddings.astype(np.float32).tobytes()
-        
-    header = struct.pack("<4sIII", b"CKGE", num_concepts, dim, precision_code)
-    
-    with open(bin_output_path, "wb") as f:
-        f.write(header)
-        f.write(payload)
-        
     with open(dict_output_path, "w", encoding="utf-8") as f:
         json.dump({
             "num_concepts": num_concepts,
@@ -332,6 +337,29 @@ def export_concepts_to_rust_binary(
     print(f"[OK] Exported {num_concepts:,} concept vectors ({dim}d, INT8: {quantize_int8}) to:")
     print(f"     Binary:     {bin_output_path} ({bin_output_path.stat().st_size / 1024 / 1024:.2f} MB)")
     print(f"     Dictionary: {dict_output_path}")
+
+def load_model_for_export(checkpoint_dir: Path, backbone_name: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2") -> nn.Module:
+    """Dynamically detects whether checkpoint is AssembledBiEncoder or SimKGCBiEncoder and loads it."""
+    model_path = checkpoint_dir / "simkgc_model.pt"
+    if not model_path.exists():
+        # Fallback to base model
+        return SimKGCBiEncoder(backbone_name=backbone_name)
+
+    state_dict = torch.load(model_path, map_location="cpu")
+    keys = list(state_dict.keys())
+    
+    if any(k.startswith("text_embedder.") or k.startswith("relational_core.") for k in keys):
+        print("[Model Loader] Detected Modular AssembledBiEncoder checkpoint structure.")
+        embedder = TextEmbedder(backbone_name=backbone_name, output_dim=256, split_layer=8)
+        core = RelationalCore(backbone_name=backbone_name, input_dim=256, output_dim=256, split_layer=8, total_layers=12)
+        model = AssembledBiEncoder(embedder, core)
+    else:
+        print("[Model Loader] Detected Standard SimKGCBiEncoder checkpoint structure.")
+        model = SimKGCBiEncoder(backbone_name=backbone_name)
+        
+    model.load_state_dict(state_dict)
+    model.eval()
+    return model
 
 def run_production_export(
     checkpoint_dir: Path,
@@ -347,13 +375,18 @@ def run_production_export(
     output_dir.mkdir(parents=True, exist_ok=True)
     
     try:
-        tokenizer = AutoTokenizer.from_pretrained(checkpoint_dir)
+        tokenizer = AutoTokenizer.from_pretrained(str(checkpoint_dir))
     except Exception:
-        tokenizer = BertTokenizer.from_pretrained(checkpoint_dir)
-        
-    model = SimKGCBiEncoder(backbone_name=str(checkpoint_dir))
-    model.load_state_dict(torch.load(checkpoint_dir / "simkgc_model.pt", map_location="cpu"))
-    model.eval()
+        try:
+            tokenizer = BertTokenizer.from_pretrained(str(checkpoint_dir))
+        except Exception:
+            tokenizer = AutoTokenizer.from_pretrained("sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
+            
+    # Save tokenizer directly to exports directory for isolated runtime bundling
+    tokenizer.save_pretrained(str(output_dir))
+    
+    # Load model with polymorphic state dict detection
+    model = load_model_for_export(checkpoint_dir)
     
     # 1. ONNX & INT8 Export
     onnx_path = output_dir / "simkgc_256d.onnx"
@@ -393,7 +426,7 @@ def run_production_export(
             selected_concepts = valid_concepts
             print(f"[Teacher Cache] Successfully extracted {len(selected_concepts):,} concept vectors from teacher cache!")
 
-    # Fallback: compute embeddings via model if teacher cache wasn't provided or incomplete
+    # Fallback: compute embeddings via model if teacher cache was missing or partial
     if embeddings is None and len(selected_concepts) > 0:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"\nPre-encoding {len(selected_concepts):,} concepts on {device} (Batch size: 2048)...")
@@ -405,23 +438,17 @@ def run_production_export(
         all_embeddings = []
         chunk_size = 2048 if torch.cuda.is_available() else 256
         
-        from tqdm import tqdm
-        pbar = tqdm(total=len(selected_concepts), desc="Encoding Concepts", unit="concept")
-        
         for i in range(0, len(selected_concepts), chunk_size):
             batch = selected_concepts[i:i + chunk_size]
             inputs = tokenizer(batch, padding=True, truncation=True, max_length=64, return_tensors="pt")
             input_ids = inputs["input_ids"].to(device)
             attention_mask = inputs["attention_mask"].to(device)
             
-            with torch.inference_mode(), torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
+            with torch.inference_mode():
                 raw_m = model.module if hasattr(model, "module") else model
                 emb = raw_m.encode(input_ids, attention_mask).float().cpu().numpy()
                 all_embeddings.append(emb)
                 
-            pbar.update(len(batch))
-            
-        pbar.close()
         embeddings = np.vstack(all_embeddings)
         
     export_concepts_to_rust_binary(

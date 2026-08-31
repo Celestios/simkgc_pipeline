@@ -13,14 +13,8 @@ class TestSimKGCModel(unittest.TestCase):
             max_position_embeddings=64
         )
         self.base_model = BertModel(self.config)
-        self.model = SimKGCBiEncoder.__new__(SimKGCBiEncoder)
-        super(SimKGCBiEncoder, self.model).__init__()
-        self.model.config = self.config
-        self.model.encoder = self.base_model
-        self.model.hidden_size = 128
-        self.model.output_dim = 256
-        self.model.projection = torch.nn.Linear(128, 256, bias=False)
-        self.model.dropout = torch.nn.Dropout(0.1)
+        # Proper initialization with backbone injection (DIP)
+        self.model = SimKGCBiEncoder(output_dim=256, backbone_model=self.base_model)
 
     def test_forward_output_shapes_and_normalization(self):
         batch_size = 4

@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Tuple, Optional
-from transformers import AutoModel, AutoConfig
+from transformers import AutoModel, AutoConfig, BertConfig, BertModel
 
 class SimKGCBiEncoder(nn.Module):
     """
@@ -14,25 +14,28 @@ class SimKGCBiEncoder(nn.Module):
     
     def __init__(self, backbone_name: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
                  output_dim: int = 256,
-                 dropout: float = 0.1):
+                 dropout: float = 0.1,
+                 backbone_model: Optional[nn.Module] = None):
         super().__init__()
-        try:
-            self.config = AutoConfig.from_pretrained(backbone_name)
-        except Exception:
-            from transformers import BertConfig
-            self.config = BertConfig.from_pretrained(backbone_name)
-            
-        try:
-            self.encoder = AutoModel.from_pretrained(backbone_name, config=self.config)
-        except Exception:
-            from transformers import BertModel
+        if backbone_model is not None:
+            self.encoder = backbone_model
+            self.config = getattr(backbone_model, "config", None)
+        else:
             try:
-                self.encoder = BertModel.from_pretrained(backbone_name, config=self.config)
+                self.config = AutoConfig.from_pretrained(backbone_name)
             except Exception:
-                self.encoder = BertModel(self.config)
+                self.config = BertConfig.from_pretrained(backbone_name)
+                
+            try:
+                self.encoder = AutoModel.from_pretrained(backbone_name, config=self.config)
+            except Exception:
+                try:
+                    self.encoder = BertModel.from_pretrained(backbone_name, config=self.config)
+                except Exception:
+                    self.encoder = BertModel(self.config)
             
         self.vocab_size = getattr(self.config, "vocab_size", 250002)
-        self.hidden_size = self.config.hidden_size
+        self.hidden_size = getattr(self.config, "hidden_size", 384)
         self.output_dim = output_dim
         
         # Dense linear projection for Matryoshka 256d
@@ -54,7 +57,6 @@ class SimKGCBiEncoder(nn.Module):
         Runs transformer encoder, pools tokens, and projects to normalized 256-d vector.
         Guarantees safe tensor bounds for CUDA kernels.
         """
-        # Safety guards: clamp input_ids to model vocab range and ensure zero token_type_ids
         safe_input_ids = torch.clamp(input_ids, min=0, max=self.vocab_size - 1)
         safe_token_type_ids = torch.zeros_like(safe_input_ids)
         

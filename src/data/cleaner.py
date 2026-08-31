@@ -3,7 +3,7 @@
 High-Precision Knowledge Graph Cleaner with Canonical Relation Filtering & Bidirectional Inverses.
 Filters assertions to ensure:
   1. Only canonical relations (32 categories) are preserved.
-  2. Generates bidirectional inverse relations automatically.
+  2. Generates bidirectional inverse relations automatically with correct language tagging.
   3. Persian text is standardized (Arabic characters -> Persian, ZWNJ normalization).
   4. ConceptNet noisy suffixes, self-loops, and duplicates are purged.
   5. Supports merging multiple raw/synthetic datasets in one unified pass.
@@ -25,13 +25,15 @@ try:
     from src.data.relations import (
         canonicalize_relation,
         get_inverse_relation,
-        CANONICAL_RELATION_NAMES
+        CANONICAL_RELATION_NAMES,
+        is_persian_text
     )
 except ImportError:
     from relations import (
         canonicalize_relation,
         get_inverse_relation,
-        CANONICAL_RELATION_NAMES
+        CANONICAL_RELATION_NAMES,
+        is_persian_text
     )
 
 PERSIAN_CHAR_MAP = {
@@ -52,7 +54,7 @@ def normalize_concept_text(text: str, lang: str = "fa") -> str:
     text = text.strip()
     text = re.sub(r'\s*\((noun|verb|adjective|adverb|n|v|adj|adv|phrase)\)', '', text, flags=re.IGNORECASE)
     
-    if lang == "fa":
+    if lang == "fa" or is_persian_text(text):
         for k, v in PERSIAN_CHAR_MAP.items():
             text = text.replace(k, v)
         text = re.sub(r'[\u200B-\u200D\uFEFF]', '\u200c', text)
@@ -62,12 +64,13 @@ def normalize_concept_text(text: str, lang: str = "fa") -> str:
         
     return text.strip()
 
-# Alias for backwards compatibility
+# Backward compatibility alias
 normalize_text = normalize_concept_text
 
 def clean_knowledge_graph(triples: List[Dict], min_weight: float = 1.0, generate_inverses: bool = True) -> List[Dict]:
     """
-    Cleans raw assertions, maps to canonical relations, and generates bidirectional inverse links.
+    Cleans raw assertions, maps to canonical relations, and generates bidirectional inverse links
+    with verified language attributes on both forward and inverse triples.
     """
     cleaned_map: Dict[Tuple[str, str, str], Dict] = {}
     
@@ -93,6 +96,9 @@ def clean_knowledge_graph(triples: List[Dict], min_weight: float = 1.0, generate
             
         if len(head) > 50 or len(tail) > 50:
             continue
+
+        head_lang = "fa" if is_persian_text(head) else "en"
+        tail_lang = "fa" if is_persian_text(tail) else "en"
             
         # 1. Forward Triple
         forward_key = (head, canonical_rel, tail)
@@ -101,11 +107,11 @@ def clean_knowledge_graph(triples: List[Dict], min_weight: float = 1.0, generate
                 "head": head,
                 "relation": canonical_rel,
                 "tail": tail,
-                "lang": lang,
+                "lang": head_lang,
                 "weight": weight
             }
             
-        # 2. Bidirectional Inverse Triple
+        # 2. Bidirectional Inverse Triple (Tagged with tail entity's true script language)
         if generate_inverses:
             inv_rel = get_inverse_relation(canonical_rel)
             if inv_rel and inv_rel in CANONICAL_RELATION_NAMES:
@@ -115,52 +121,41 @@ def clean_knowledge_graph(triples: List[Dict], min_weight: float = 1.0, generate
                         "head": tail,
                         "relation": inv_rel,
                         "tail": head,
-                        "lang": lang,
+                        "lang": tail_lang,
                         "weight": weight
                     }
-            
+                    
     return list(cleaned_map.values())
 
-def clean_dataset_files(input_paths: List[Path], output_path: Path, min_weight: float = 1.0) -> int:
-    """Reads one or multiple JSON datasets, cleans, merges and writes canonical dataset."""
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    all_raw = []
-    
-    for inp in input_paths:
-        p = Path(inp)
-        if not p.exists():
-            print(f"[Warning] Input file {p} does not exist, skipping.")
-            continue
-        print(f"Reading dataset: {p}...")
-        with open(p, "r", encoding="utf-8") as f:
-            try:
+def clean_dataset_files(input_paths: List[str], output_path: str, min_weight: float = 1.0) -> int:
+    """Reads multiple input JSON files, merges and cleans them, and writes output."""
+    all_triples = []
+    for ip in input_paths:
+        p = Path(ip)
+        if p.exists():
+            with open(p, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                all_raw.extend(data)
-                print(f"  -> Loaded {len(data):,} assertions from {p.name}")
-            except Exception as e:
-                print(f"  -> Error loading {p}: {e}")
-                
-    print(f"\nTotal loaded: {len(all_raw):,} raw assertions across {len(input_paths)} files.")
-    print("Cleaning, deduplicating, generating inverses, and mapping to 32 canonical relations...")
-    cleaned = clean_knowledge_graph(all_raw, min_weight=min_weight, generate_inverses=True)
+                if isinstance(data, list):
+                    all_triples.extend(data)
+                elif isinstance(data, dict) and "triples" in data:
+                    all_triples.extend(data["triples"])
+
+    print(f"Loaded {len(all_triples):,} raw assertions across {len(input_paths)} files.")
+    cleaned = clean_knowledge_graph(all_triples, min_weight=min_weight, generate_inverses=True)
     
-    with open(output_path, "w", encoding="utf-8") as f:
+    out_p = Path(output_path)
+    out_p.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_p, "w", encoding="utf-8") as f:
         json.dump(cleaned, f, ensure_ascii=False, indent=2)
         
-    print("=" * 65)
-    print(f"[CLEAN COMPLETE] {len(all_raw):,} raw -> {len(cleaned):,} canonical bidirectional assertions.")
-    print(f"Saved to: {output_path} ({output_path.stat().st_size / 1024 / 1024:.1f} MB)")
-    print("=" * 65)
+    print(f"Saved {len(cleaned):,} high-quality canonical assertions to {output_path}")
     return len(cleaned)
 
-# Alias
-clean_dataset_file = lambda inp, out, min_weight=1.0: clean_dataset_files([inp], out, min_weight)
-
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Clean, Canonicalize, and Merge Knowledge Graph Datasets")
-    parser.add_argument("--input", nargs="+", default=["data/raw/conceptnet_subset.json", "data/synthetic/all_triplets_deduped.json"], help="Input dataset path(s)")
-    parser.add_argument("--output", type=str, default="data/raw/conceptnet_clean.json", help="Clean dataset output path")
-    parser.add_argument("--min-weight", type=float, default=0.5, help="Minimum assertion confidence weight")
+    parser = argparse.ArgumentParser(description="Clean and canonicalize knowledge graph triples.")
+    parser.add_argument("--inputs", nargs="+", default=["data/raw/conceptnet_subset.json"], help="Input file paths")
+    parser.add_argument("--output", default="data/raw/conceptnet_clean.json", help="Output file path")
+    parser.add_argument("--min-weight", type=float, default=1.0, help="Minimum assertion confidence weight")
     args = parser.parse_args()
     
-    clean_dataset_files([Path(p) for p in args.input], Path(args.output), min_weight=args.min_weight)
+    clean_dataset_files(args.inputs, args.output, args.min_weight)

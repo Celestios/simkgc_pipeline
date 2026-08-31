@@ -1,74 +1,95 @@
-import unittest
+import os
+import json
 import struct
+import unittest
+import tempfile
 import numpy as np
 from pathlib import Path
-from src.export import export_concepts_to_rust_binary
+from src.export import (
+    is_valid_concept_string,
+    select_top_production_concepts,
+    export_concepts_to_rust_binary,
+    export_relations_metadata,
+    write_ckge_binary,
+    quantize_int8_matrix
+)
 
 class TestExportBinary(unittest.TestCase):
-    def test_rust_binary_serializer_and_header(self):
-        concepts = ["ایران", "آسیا", "زمین", "جاذبه"]
-        num_concepts = len(concepts)
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.out_dir = Path(self.temp_dir.name)
+        self.bin_path = self.out_dir / "test_concepts.bin"
+        self.dict_path = self.out_dir / "test_dict.json"
+        self.meta_path = self.out_dir / "test_relations.json"
+        self.triples_path = self.out_dir / "test_triples.json"
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def test_ckge_binary_serialization(self):
+        num_concepts = 100
         dim = 256
-        vecs = np.random.randn(num_concepts, dim).astype(np.float32)
-        vecs /= np.linalg.norm(vecs, axis=1, keepdims=True)
+        embeddings = np.random.randn(num_concepts, dim).astype(np.float32)
+        embeddings = embeddings / np.linalg.norm(embeddings, axis=-1, keepdims=True)
+        concepts = [f"concept_{i}" for i in range(num_concepts)]
 
-        out_bin = Path("exports/test_concepts.bin")
-        out_dict = Path("exports/test_dict.json")
+        export_concepts_to_rust_binary(
+            concepts=concepts,
+            embeddings=embeddings,
+            bin_output_path=self.bin_path,
+            dict_output_path=self.dict_path,
+            quantize_int8=True
+        )
 
-        export_concepts_to_rust_binary(concepts, vecs, out_bin, out_dict, quantize_int8=True)
+        self.assertTrue(self.bin_path.exists())
+        self.assertTrue(self.dict_path.exists())
 
-        self.assertTrue(out_bin.exists())
-        self.assertTrue(out_dict.exists())
-
-        # Verify CKGE header
-        with open(out_bin, "rb") as f:
-            header_bytes = f.read(16)
-            magic, n_concepts, d, prec = struct.unpack("<4sIII", header_bytes)
+        # Verify Header (16 bytes)
+        with open(self.bin_path, "rb") as f:
+            header = f.read(16)
+            magic, n_c, d, prec = struct.unpack("<4sIII", header)
             self.assertEqual(magic, b"CKGE")
-            self.assertEqual(n_concepts, num_concepts)
+            self.assertEqual(n_c, num_concepts)
             self.assertEqual(d, dim)
-            self.assertEqual(prec, 1) # INT8 code
+            self.assertEqual(prec, 1)
 
             payload = f.read()
             self.assertEqual(len(payload), num_concepts * dim)
 
-        # Cleanup test files
-        if out_bin.exists():
-            out_bin.unlink()
-        if out_dict.exists():
-            out_dict.unlink()
+    def test_relations_metadata_export(self):
+        export_relations_metadata(self.meta_path)
+        self.assertTrue(self.meta_path.exists())
+        with open(self.meta_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        self.assertIn("IsA", data)
+        self.assertIn("PartOf", data)
 
-    def test_concept_filtering_and_selection(self):
-        import json
-        from src.export import is_persian_text, is_valid_concept_string, select_top_production_concepts
-        
-        self.assertTrue(is_persian_text("ایران"))
-        self.assertTrue(is_persian_text("هوش مصنوعی"))
-        self.assertFalse(is_persian_text("Artificial Intelligence"))
-        
-        self.assertTrue(is_valid_concept_string("دانشگاه تهران"))
-        self.assertFalse(is_valid_concept_string("http://example.com"))
-        self.assertFalse(is_valid_concept_string("12345"))
-        self.assertFalse(is_valid_concept_string("this is an excessively long concept phrase that exceeds maximum word limit"))
-        
-        dummy_triples = [
-            {"head": "ایران", "relation": "IsA", "tail": "کشور", "weight": 2.0},
-            {"head": "ایران", "relation": "PartOf", "tail": "آسیا", "weight": 1.5},
-            {"head": "تهران", "relation": "IsA", "tail": "پایتخت", "weight": 1.0},
-            {"head": "England", "relation": "IsA", "tail": "country", "weight": 2.0},
-            {"head": "London", "relation": "IsA", "tail": "capital", "weight": 1.0},
-            {"head": "England", "relation": "PartOf", "tail": "Europe", "weight": 1.5},
+    def test_lexical_filters(self):
+        self.assertTrue(is_valid_concept_string("هوش مصنوعی"))
+        self.assertTrue(is_valid_concept_string("machine learning"))
+        self.assertFalse(is_valid_concept_string("a"))  # Too short
+        self.assertFalse(is_valid_concept_string("12345"))  # Pure digits
+        self.assertFalse(is_valid_concept_string("this is a very long sentence with many words"))  # > 4 words
+        self.assertFalse(is_valid_concept_string("http://example.com/item"))  # URL
+
+    def test_concept_curation_quotas(self):
+        mock_triples = [
+            {"head": "ایران", "relation": "IsA", "tail": "کشور", "weight": 3.0},
+            {"head": "تهران", "relation": "PartOf", "tail": "ایران", "weight": 2.0},
+            {"head": "Paris", "relation": "IsA", "tail": "City", "weight": 3.0},
+            {"head": "France", "relation": "HasPart", "tail": "Paris", "weight": 2.0},
+            {"head": "London", "relation": "IsA", "tail": "City", "weight": 2.0},
         ]
-        test_json = Path("exports/test_triples.json")
-        test_json.parent.mkdir(parents=True, exist_ok=True)
-        with open(test_json, "w", encoding="utf-8") as f:
-            json.dump(dummy_triples, f)
-            
-        selected = select_top_production_concepts([str(test_json)], total_quota=4, fa_quota=2, en_quota=2)
+        with open(self.triples_path, "w", encoding="utf-8") as f:
+            json.dump(mock_triples, f)
+
+        selected = select_top_production_concepts(
+            data_paths=[str(self.triples_path)],
+            total_quota=4,
+            fa_quota=2,
+            en_quota=2
+        )
         self.assertEqual(len(selected), 4)
-        
-        if test_json.exists():
-            test_json.unlink()
 
 if __name__ == "__main__":
     unittest.main()

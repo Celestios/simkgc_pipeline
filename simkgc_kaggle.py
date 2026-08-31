@@ -1,14 +1,7 @@
 #!/usr/bin/env python3
 """
 SimKGC Pipeline - Full Cloud Execution Script for Kaggle GPUs.
-Runs 100% in the cloud and directly uploads all trained models & production exports to Hugging Face Hub:
-  1. Setup & Environment
-  2. Data Cleaning & Inverse Generation
-  3. BGE-M3 Teacher Vector Generation
-  4. Stage 1A: TextEmbedder Training (Layers 1–8) -> Pushes embedder_l1_8_final.pt to HF
-  5. Stage 1B: RelationalCore Training (Layers 9–12) -> Pushes relational_core_l9_12_final.pt to HF
-  6. Stage 2: Joint Model Calibration & Auto-Export -> Pushes full release bundle to HF
-  7. Verification Smoke Tests
+All pipeline options are easily configurable below in PIPELINE_CONFIG.
 """
 
 import os
@@ -19,8 +12,48 @@ import time
 from pathlib import Path
 from typing import Optional
 
-# Read HF token from environment or Kaggle Secrets
-HF_REPO = "Celestios/Persian-simkgc-256d"
+# =====================================================================
+# ⚙️ USER PIPELINE CONFIGURATION (Choose your options here)
+# =====================================================================
+PIPELINE_CONFIG = {
+    # Target Hugging Face Model Repository
+    "hf_repo": "Celestios/Persian-simkgc-256d",
+
+    # Stage 0: BGE-M3 Teacher Target Encodings
+    # Options: "download" (pulls precomputed ~100MB cache from HF) or "recompute" (encodes fresh on GPU)
+    "teacher_targets_mode": "download",
+
+    # Stage 1A: TextEmbedder Training (Layers 1–8)
+    "run_stage_1a": True,
+    "stage_1a_epochs": 4,
+    "stage_1a_batch_size": 512,
+    "stage_1a_resume": True,             # Resume from local checkpoint if available
+    "stage_1a_from_hf": False,           # Download Stage 1A checkpoint from HF
+    "stage_1a_push_to_hf": True,         # Upload Stage 1A model to HF
+
+    # Stage 1B: RelationalCore Training (Layers 9–12)
+    "run_stage_1b": True,
+    "stage_1b_epochs": 10,
+    "stage_1b_batch_size": 512,
+    "stage_1b_resume": True,             # Resume from local checkpoint if available
+    "stage_1b_from_hf": False,           # Download Stage 1B checkpoint from HF
+    "stage_1b_push_to_hf": True,         # Upload Stage 1B model to HF
+
+    # Stage 2: AssembledBiEncoder Joint Calibration & Auto-Export
+    "run_stage_2": True,
+    "stage_2_epochs": 15,
+    "stage_2_batch_size": 512,
+    "stage_2_resume": True,              # Resume from local checkpoint if available
+    "stage_2_from_hf": False,            # Download Stage 2 model from HF
+    "stage_2_push_to_hf": True,          # Upload full release bundle to HF
+    "stage_2_auto_export": True,         # Automatically generate ONNX INT8 + 12.8MB Binary
+
+    # Verification & Benchmarks
+    "run_smoke_test": True
+}
+# =====================================================================
+
+HF_REPO = PIPELINE_CONFIG["hf_repo"]
 HF_TOKEN = os.environ.get("HF_TOKEN")
 
 if not HF_TOKEN:
@@ -100,39 +133,52 @@ def main():
     )
 
     # 4. Extract BGE-M3 Teacher Target Embeddings
-    run_step(
-        "4. BGE-M3 Teacher Vector Generation",
-        f"python src/data/teacher_embedder.py --data data/raw/conceptnet_clean.json --out-npy cache/bge_m3_concept_targets.npy --out-dict cache/concepts_dict.json --from-hf {HF_REPO} --batch-size 2048",
-        cwd=base_dir
-    )
+    teacher_cmd = "python src/data/teacher_embedder.py --data data/raw/conceptnet_clean.json --out-npy cache/bge_m3_concept_targets.npy --out-dict cache/concepts_dict.json --batch-size 2048"
+    if PIPELINE_CONFIG["teacher_targets_mode"] == "download":
+        teacher_cmd += f" --from-hf {HF_REPO}"
+    else:
+        teacher_cmd += " --force-recompute"
+        
+    run_step("4. BGE-M3 Teacher Target Encodings", teacher_cmd, cwd=base_dir)
 
-    # 5. Stage 1A: TextEmbedder Training (Layers 1-8) & Direct Push to HF
-    run_step(
-        "5. STAGE 1A: Train TextEmbedder (Layers 1-8) -> Upload to HF",
-        f"python src/train_embedder.py --push-to-hf --hf-repo {HF_REPO}",
-        cwd=base_dir
-    )
+    # 5. Stage 1A: TextEmbedder Training (Layers 1-8)
+    if PIPELINE_CONFIG["run_stage_1a"]:
+        cmd_1a = f"python src/train_embedder.py --epochs {PIPELINE_CONFIG['stage_1a_epochs']} --batch-size {PIPELINE_CONFIG['stage_1a_batch_size']}"
+        if not PIPELINE_CONFIG["stage_1a_resume"]:
+            cmd_1a += " --no-resume"
+        if PIPELINE_CONFIG["stage_1a_from_hf"]:
+            cmd_1a += f" --from-hf {HF_REPO}"
+        if PIPELINE_CONFIG["stage_1a_push_to_hf"]:
+            cmd_1a += f" --push-to-hf --hf-repo {HF_REPO}"
+        run_step("5. STAGE 1A: Train TextEmbedder (Layers 1-8)", cmd_1a, cwd=base_dir)
 
-    # 6. Stage 1B: RelationalCore Training (Layers 9-12) & Direct Push to HF
-    run_step(
-        "6. STAGE 1B: Train RelationalCore (Layers 9-12) -> Upload to HF",
-        f"python src/train_core.py --push-to-hf --hf-repo {HF_REPO}",
-        cwd=base_dir
-    )
+    # 6. Stage 1B: RelationalCore Training (Layers 9-12)
+    if PIPELINE_CONFIG["run_stage_1b"]:
+        cmd_1b = f"python src/train_core.py --epochs {PIPELINE_CONFIG['stage_1b_epochs']} --batch-size {PIPELINE_CONFIG['stage_1b_batch_size']}"
+        if not PIPELINE_CONFIG["stage_1b_resume"]:
+            cmd_1b += " --no-resume"
+        if PIPELINE_CONFIG["stage_1b_from_hf"]:
+            cmd_1b += f" --from-hf {HF_REPO}"
+        if PIPELINE_CONFIG["stage_1b_push_to_hf"]:
+            cmd_1b += f" --push-to-hf --hf-repo {HF_REPO}"
+        run_step("6. STAGE 1B: Train RelationalCore (Layers 9-12)", cmd_1b, cwd=base_dir)
 
-    # 7. Stage 2: Joint Assembled Model Calibration, Auto-Export & Direct Push to HF
-    run_step(
-        "7. STAGE 2: Joint Calibration, Export & Full Hub Release -> Upload to HF",
-        f"python src/train_joint.py --push-to-hf --hf-repo {HF_REPO}",
-        cwd=base_dir
-    )
+    # 7. Stage 2: Joint Assembled Model Calibration & Automated Export
+    if PIPELINE_CONFIG["run_stage_2"]:
+        cmd_2 = f"python src/train_joint.py --epochs {PIPELINE_CONFIG['stage_2_epochs']} --batch-size {PIPELINE_CONFIG['stage_2_batch_size']}"
+        if not PIPELINE_CONFIG["stage_2_resume"]:
+            cmd_2 += " --no-resume"
+        if not PIPELINE_CONFIG["stage_2_auto_export"]:
+            cmd_2 += " --no-export"
+        if PIPELINE_CONFIG["stage_2_from_hf"]:
+            cmd_2 += f" --from-hf {HF_REPO}"
+        if PIPELINE_CONFIG["stage_2_push_to_hf"]:
+            cmd_2 += f" --push-to-hf --hf-repo {HF_REPO}"
+        run_step("7. STAGE 2: Joint Calibration & Export", cmd_2, cwd=base_dir)
 
     # 8. Live Smoke Test Across All Capabilities
-    run_step(
-        "8. Verification Smoke Tests",
-        "python src/demo_inference.py --benchmark",
-        cwd=base_dir
-    )
+    if PIPELINE_CONFIG["run_smoke_test"]:
+        run_step("8. Verification Smoke Tests", "python src/demo_inference.py --benchmark", cwd=base_dir)
 
     print("\n================================================================================", flush=True)
     print(f"   [DONE] ALL ARTIFACTS DIRECTLY UPLOADED TO: https://huggingface.co/{HF_REPO}   ", flush=True)

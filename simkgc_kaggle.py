@@ -21,7 +21,7 @@ PIPELINE_CONFIG = {
 
     # Stage 0: BGE-M3 Teacher Target Encodings
     # Options: "download" (pulls precomputed ~100MB cache from HF) or "recompute" (encodes fresh on GPU)
-    "teacher_targets_mode": "download",
+    "teacher_targets_mode": "recompute",
 
     # Stage 1A: TextEmbedder Training (Layers 1–8)
     "run_stage_1a": True,
@@ -137,7 +137,7 @@ def main():
     if PIPELINE_CONFIG["teacher_targets_mode"] == "download":
         teacher_cmd += f" --from-hf {HF_REPO}"
     else:
-        teacher_cmd += " --force-recompute"
+        teacher_cmd += f" --force-recompute --push-to-hf --hf-repo {HF_REPO}"
         
     run_step("4. BGE-M3 Teacher Target Encodings", teacher_cmd, cwd=base_dir)
 

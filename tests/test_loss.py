@@ -1,10 +1,10 @@
 import unittest
 import torch
-from src.model.loss import SimKGCMatryoshkaLoss, SimKGCDistillationLoss
+from src.model.loss import SimKGCContrastiveLoss, SimKGCDistillationLoss
 
 class TestSimKGCLoss(unittest.TestCase):
     def setUp(self):
-        self.criterion = SimKGCMatryoshkaLoss(temperature=0.05, primary_dim=256, aux_dim=128)
+        self.criterion = SimKGCContrastiveLoss(temperature=0.05)
 
     def test_loss_computation_and_backward(self):
         batch_size = 8

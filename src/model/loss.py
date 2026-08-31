@@ -3,29 +3,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional, List, Union
 
-class SimKGCMatryoshkaLoss(nn.Module):
+class SimKGCContrastiveLoss(nn.Module):
     """
-    SimKGC InfoNCE Loss with nested Matryoshka Representation Learning (MRL) support.
-    Computes symmetric bidirectional contrastive loss over in-batch negatives across
-    primary (e.g. 256d) and optional auxiliary nested dimensions (e.g. 128d, 64d).
+    Standard Symmetric Bidirectional InfoNCE Loss for SimKGC.
+    Computes contrastive loss over in-batch negatives in 256-d vector space.
     """
-    def __init__(self,
-                 temperature: float = 0.05,
-                 primary_dim: int = 256,
-                 aux_dim: Optional[Union[int, List[int]]] = None,
-                 mrl_weight: float = 0.3,
-                 **kwargs):
+    def __init__(self, temperature: float = 0.05, **kwargs):
         super().__init__()
         self.temperature = temperature
-        self.primary_dim = primary_dim
-        self.mrl_weight = mrl_weight
-        if isinstance(aux_dim, int):
-            self.aux_dims = [aux_dim]
-        elif isinstance(aux_dim, list):
-            self.aux_dims = aux_dim
-        else:
-            self.aux_dims = []
-            
         self.cross_entropy = nn.CrossEntropyLoss()
 
     def _compute_infonce(self, hr: torch.Tensor, tail: torch.Tensor) -> torch.Tensor:
@@ -39,26 +24,19 @@ class SimKGCMatryoshkaLoss(nn.Module):
     def forward(self, hr_embeddings: torch.Tensor, tail_embeddings: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            hr_embeddings: Tensor of shape (BatchSize, primary_dim)
-            tail_embeddings: Tensor of shape (BatchSize, primary_dim)
+            hr_embeddings: Tensor of shape (BatchSize, 256)
+            tail_embeddings: Tensor of shape (BatchSize, 256)
         """
-        # Primary full-dimensional loss
-        loss = self._compute_infonce(hr_embeddings, tail_embeddings)
+        return self._compute_infonce(hr_embeddings, tail_embeddings)
 
-        # MRL nested sub-vector losses
-        for dim in self.aux_dims:
-            if dim < hr_embeddings.size(-1):
-                hr_slice = F.normalize(hr_embeddings[:, :dim], p=2, dim=-1)
-                tail_slice = F.normalize(tail_embeddings[:, :dim], p=2, dim=-1)
-                loss += self.mrl_weight * self._compute_infonce(hr_slice, tail_slice)
-
-        return loss
+# Backward-compatibility alias
+SimKGCMatryoshkaLoss = SimKGCContrastiveLoss
 
 class SimKGCDistillationLoss(nn.Module):
     """
     Teacher-Student Distillation Loss.
     Combines direct cosine distance alignment with in-batch contrastive matching
-    against frozen BGE-M3 teacher target vectors.
+    against frozen BGE-M3 teacher target vectors in 256-d space.
     """
     def __init__(self, temperature: float = 0.05, alpha: float = 0.5, **kwargs):
         super().__init__()

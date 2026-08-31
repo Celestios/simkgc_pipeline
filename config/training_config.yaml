@@ -2,9 +2,9 @@
 
 model:
   backbone_name: "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-  prune_vocab_to_fa_en: false    # Keep intact to ensure token ID mapping matches model embeddings
+  prune_vocab_to_fa_en: false
   target_languages: ["fa", "en"]
-  output_dimensions: [256, 128]  # Matryoshka dimensions (256d primary + 128d nested)
+  output_dimensions: [256]       # Standard 256d embedding space
   max_seq_length: 64
 
 distillation:
@@ -12,17 +12,16 @@ distillation:
   teacher_model: "BAAI/bge-m3"   # 560M state-of-the-art multilingual teacher
   teacher_cache_path: "cache/bge_m3_concept_targets.npy"
   teacher_dict_path: "cache/concepts_dict.json"
-  alpha: 0.7                     # 70% direct teacher cosine alignment, 30% contrastive matching
+  alpha: 0.6                     # 60% direct teacher cosine alignment, 40% contrastive matching
 
 training:
-  batch_size: 512                # Increased batch size for maximum 2x T4 GPU saturation
-  learning_rate: 3.0e-5
+  batch_size: 512
+  learning_rate: 1.5e-5
   warmup_ratio: 0.1
   weight_decay: 0.01
-  num_train_epochs: 25           # Train for 25 epochs
-  save_every_epochs: 5           # Save checkpoint every 5 epochs
+  num_train_epochs: 15
   temperature: 0.05
-  use_fp16: true                 # GPU mixed precision
+  use_fp16: true
   logging_steps: 50
   seed: 42
 
@@ -31,6 +30,7 @@ data:
     - "data/raw/conceptnet_clean.json"
   train_split: 0.85
   eval_split: 0.15
+  seed: 42
 
 export:
   checkpoint_dir: "checkpoints/simkgc_fa_en"
@@ -38,6 +38,6 @@ export:
   quantized_onnx_path: "exports/simkgc_256d_int8.onnx"
   concept_binary_path: "exports/concepts_256d_int8.bin"
   concept_dict_path: "exports/concepts_dict.json"
-  max_production_concepts: 50000 # Top 50,000 concepts in shipped binary (~12.8 MB)
-  persian_quota: 15000           # 15,000 Persian concepts
-  english_quota: 35000           # 35,000 English concepts
+  max_production_concepts: 50000
+  persian_quota: 15000
+  english_quota: 35000

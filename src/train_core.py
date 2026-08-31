@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Stage 1 - Sub-Module B: Relational Core Training (Layers 9–12).
+Stage 1 - Sub-Module B: Relational Core Training & Dedicated Validation (Layers 9–12).
 Learns pure vector manifold graph reasoning (v_h* + r -> v_t*) directly from BGE-M3 teacher targets.
+Evaluates holdout vector triples on Vector MRR, Hits@1, Hits@3, and Hits@10.
 """
 
 import os
@@ -10,10 +11,11 @@ import json
 import yaml
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import numpy as np
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, random_split
 from transformers import get_cosine_schedule_with_warmup
 
 # Add project root to sys.path
@@ -25,13 +27,75 @@ from src.model.modular_encoder import RelationalCore
 from src.data.dataset import VectorTripleDataset, vector_triple_collate_fn
 from src.data.relations import CANONICAL_RELATIONS
 
+def evaluate_core(core: nn.Module, val_loader: DataLoader, device: torch.device, temperature: float = 0.05) -> Dict[str, float]:
+    """
+    Evaluates RelationalCore on holdout vector triples:
+      1. Vector Link Prediction MRR (Mean Reciprocal Rank)
+      2. In-Batch Hits@1, Hits@3, Hits@10
+      3. Mean Cosine Alignment
+      4. Validation Loss
+    """
+    core.eval()
+    cross_entropy = nn.CrossEntropyLoss()
+    total_loss = 0.0
+    total_cosine_sim = 0.0
+    total_rr = 0.0
+    hits_1 = 0
+    hits_3 = 0
+    hits_10 = 0
+    total_samples = 0
+    val_steps = 0
+
+    with torch.no_grad():
+        for h_vecs, r_ids, t_vecs in val_loader:
+            h_vecs = h_vecs.to(device)
+            r_ids = r_ids.to(device)
+            t_vecs = t_vecs.to(device)
+            batch_size = h_vecs.size(0)
+
+            pred_t_vecs = core(h_vecs, r_ids)
+
+            # Similarity against all in-batch tail candidates
+            sim_matrix = torch.matmul(pred_t_vecs, t_vecs.T) / temperature
+            labels = torch.arange(batch_size, device=device)
+
+            loss_infonce = cross_entropy(sim_matrix, labels)
+            loss_align = torch.mean(1.0 - torch.sum(pred_t_vecs * t_vecs, dim=-1))
+            total_loss += (loss_infonce + 0.3 * loss_align).item()
+            val_steps += 1
+
+            # Cosine similarity
+            cos_sims = torch.sum(pred_t_vecs * t_vecs, dim=-1)
+            total_cosine_sim += cos_sims.sum().item()
+
+            # Rank of true tail
+            ranks = torch.argsort(sim_matrix, dim=-1, descending=True)
+            # Find index of target in ranked list
+            target_ranks = (ranks == labels.unsqueeze(1)).nonzero()[:, 1] + 1  # 1-indexed
+
+            total_rr += torch.sum(1.0 / target_ranks.float()).item()
+            hits_1 += torch.sum(target_ranks == 1).item()
+            hits_3 += torch.sum(target_ranks <= 3).item()
+            hits_10 += torch.sum(target_ranks <= 10).item()
+            total_samples += batch_size
+
+    return {
+        "val_loss": total_loss / max(val_steps, 1),
+        "mean_cosine_sim": total_cosine_sim / max(total_samples, 1),
+        "mrr": total_rr / max(total_samples, 1),
+        "hits@1": hits_1 / max(total_samples, 1),
+        "hits@3": hits_3 / max(total_samples, 1),
+        "hits@10": hits_10 / max(total_samples, 1),
+    }
+
 def train_core(config_path: str = "config/training_config.yaml",
                batch_size: Optional[int] = None,
                epochs: Optional[int] = None,
                lr: Optional[float] = None,
-               temperature: Optional[float] = None):
+               temperature: Optional[float] = None,
+               val_split: float = 0.15):
     """
-    Trains RelationalCore (Layers 9–12) on pure 256-d concept vectors with link prediction InfoNCE loss.
+    Trains RelationalCore (Layers 9–12) with dedicated holdout validation & best-checkpoint selection.
     """
     config_p = Path(config_path)
     config = {}
@@ -49,6 +113,7 @@ def train_core(config_path: str = "config/training_config.yaml",
     epochs = epochs or config.get("training", {}).get("num_train_epochs", 10)
     lr = lr or float(config.get("training", {}).get("learning_rate", 2e-4))
     temperature = temperature or float(config.get("training", {}).get("temperature", 0.05))
+    seed = config.get("data", {}).get("seed", 42)
 
     # Paths
     teacher_cache = Path(config.get("distillation", {}).get("teacher_cache_path", "cache/bge_m3_concept_targets.npy"))
@@ -86,15 +151,30 @@ def train_core(config_path: str = "config/training_config.yaml",
                     all_triples.extend(data["triples"])
 
     print(f"Loaded {len(all_triples):,} raw triples. Filtering against {len(concepts):,} known concepts...")
-    dataset = VectorTripleDataset(all_triples, teacher_embeddings, concept_to_idx, relation_to_idx)
-    print(f"Valid vector triples for Relational Core: {len(dataset):,}")
+    full_dataset = VectorTripleDataset(all_triples, teacher_embeddings, concept_to_idx, relation_to_idx)
+    print(f"Valid vector triples: {len(full_dataset):,}")
 
-    dataloader = DataLoader(
-        dataset,
+    val_size = int(len(full_dataset) * val_split)
+    train_size = len(full_dataset) - val_size
+
+    train_dataset, val_dataset = random_split(
+        full_dataset, [train_size, val_size],
+        generator=torch.Generator().manual_seed(seed)
+    )
+    print(f"Dataset split: {train_size:,} train triples | {val_size:,} validation triples ({val_split*100:.0f}%)")
+
+    train_loader = DataLoader(
+        train_dataset,
         batch_size=batch_size,
         shuffle=True,
         collate_fn=vector_triple_collate_fn,
         drop_last=True
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=vector_triple_collate_fn
     )
 
     core = RelationalCore(
@@ -108,16 +188,17 @@ def train_core(config_path: str = "config/training_config.yaml",
     core.to(device)
 
     optimizer = torch.optim.AdamW(core.parameters(), lr=lr, weight_decay=0.01)
-    total_steps = len(dataloader) * epochs
+    total_steps = len(train_loader) * epochs
     scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=int(total_steps * 0.1), num_training_steps=total_steps)
     cross_entropy = nn.CrossEntropyLoss()
 
-    core.train()
-    print(f"Starting Relational Core training for {epochs} epochs ({len(dataloader)} steps/epoch)...")
+    print(f"\nStarting Relational Core training for {epochs} epochs ({len(train_loader)} steps/epoch)...")
+    best_mrr = -1.0
 
     for epoch in range(epochs):
+        core.train()
         total_loss = 0.0
-        for step, (h_vecs, r_ids, t_vecs) in enumerate(dataloader):
+        for step, (h_vecs, r_ids, t_vecs) in enumerate(train_loader):
             h_vecs = h_vecs.to(device)
             r_ids = r_ids.to(device)
             t_vecs = t_vecs.to(device)
@@ -143,15 +224,28 @@ def train_core(config_path: str = "config/training_config.yaml",
 
             if (step + 1) % 50 == 0:
                 avg_loss = total_loss / (step + 1)
-                print(f"Epoch [{epoch+1}/{epochs}] Step [{step+1}/{len(dataloader)}] - Loss: {avg_loss:.4f} (InfoNCE: {loss_infonce.item():.4f}, Align: {loss_align.item():.4f})")
+                print(f"Epoch [{epoch+1}/{epochs}] Step [{step+1}/{len(train_loader)}] - Loss: {avg_loss:.4f}")
 
+        # Dedicated Holdout Validation
+        metrics = evaluate_core(core, val_loader, device, temperature)
+        print(f"\n---> [Stage 1B Validation - Epoch {epoch+1}/{epochs}]")
+        print(f"     • Val Loss:        {metrics['val_loss']:.4f}")
+        print(f"     • Vector MRR:      {metrics['mrr']:.4f}")
+        print(f"     • Vector Hits@1:   {metrics['hits@1']*100:.2f}%")
+        print(f"     • Vector Hits@3:   {metrics['hits@3']*100:.2f}%")
+        print(f"     • Vector Hits@10:  {metrics['hits@10']*100:.2f}%\n")
+
+        # Save epoch checkpoint
         checkpoint_path = output_dir / f"core_epoch_{epoch+1}.pt"
         torch.save(core.state_dict(), checkpoint_path)
-        print(f"Saved checkpoint: {checkpoint_path}")
 
-    final_path = output_dir / "relational_core_l9_12_final.pt"
-    torch.save(core.state_dict(), final_path)
-    print(f"\n[DONE] Relational Core training complete. Saved to: {final_path}")
+        if metrics["mrr"] > best_mrr:
+            best_mrr = metrics["mrr"]
+            best_path = output_dir / "relational_core_l9_12_final.pt"
+            torch.save(core.state_dict(), best_path)
+            print(f"  ★ New best RelationalCore saved to {best_path} (MRR: {best_mrr:.4f})")
+
+    print(f"\n[DONE] Stage 1B complete! Best RelationalCore saved at: {output_dir / 'relational_core_l9_12_final.pt'}")
 
 if __name__ == "__main__":
     train_core()

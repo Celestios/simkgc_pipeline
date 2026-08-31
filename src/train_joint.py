@@ -3,7 +3,7 @@
 Stage 2 - Assembled Model Joint Fine-Tuning & Production Calibration.
 Loads Stage 1A (TextEmbedder) and Stage 1B (RelationalCore) checkpoints,
 assembles them into AssembledBiEncoder, and performs low-LR end-to-end training
-with validation evaluation and lifecycle tracking.
+with dedicated holdout validation (MRR, Hits@1, Hits@3, Hits@10, and Validation Loss).
 """
 
 import os
@@ -27,25 +27,56 @@ from src.model.modular_encoder import TextEmbedder, RelationalCore, AssembledBiE
 from src.model.loss import SimKGCMatryoshkaLoss, SimKGCDistillationLoss
 from src.data.dataset import SimKGCDataset, SimKGCCollator
 
-def evaluate_model(model: nn.Module, val_loader: DataLoader, device: torch.device, output_dim: int) -> float:
-    """Evaluates validation loss across val_loader batches."""
+def evaluate_model(model: nn.Module, val_loader: DataLoader, device: torch.device, output_dim: int, temperature: float = 0.05) -> Dict[str, float]:
+    """
+    Evaluates AssembledBiEncoder on holdout graph triples:
+      1. End-to-End MRR (Mean Reciprocal Rank)
+      2. In-Batch Hits@1, Hits@3, Hits@10
+      3. Validation Loss
+    """
     model.eval()
-    criterion = SimKGCMatryoshkaLoss(temperature=0.05, primary_dim=output_dim)
+    criterion = SimKGCMatryoshkaLoss(temperature=temperature, primary_dim=output_dim)
     total_val_loss = 0.0
+    total_rr = 0.0
+    hits_1 = 0
+    hits_3 = 0
+    hits_10 = 0
+    total_samples = 0
     val_steps = 0
+
     with torch.no_grad():
         for batch in val_loader:
             hr_ids = batch["hr_input_ids"].to(device)
             hr_mask = batch["hr_attention_mask"].to(device)
             tail_ids = batch["tail_input_ids"].to(device)
             tail_mask = batch["tail_attention_mask"].to(device)
+            batch_size = hr_ids.size(0)
 
             hr_vecs, tail_vecs = model(hr_ids, hr_mask, tail_ids, tail_mask)
             loss = criterion(hr_vecs, tail_vecs)
             total_val_loss += loss.item()
             val_steps += 1
 
-    return total_val_loss / max(val_steps, 1)
+            # In-batch similarity ranking
+            sim_matrix = torch.matmul(hr_vecs, tail_vecs.T) / temperature
+            labels = torch.arange(batch_size, device=device)
+
+            ranks = torch.argsort(sim_matrix, dim=-1, descending=True)
+            target_ranks = (ranks == labels.unsqueeze(1)).nonzero()[:, 1] + 1  # 1-indexed
+
+            total_rr += torch.sum(1.0 / target_ranks.float()).item()
+            hits_1 += torch.sum(target_ranks == 1).item()
+            hits_3 += torch.sum(target_ranks <= 3).item()
+            hits_10 += torch.sum(target_ranks <= 10).item()
+            total_samples += batch_size
+
+    return {
+        "val_loss": total_val_loss / max(val_steps, 1),
+        "mrr": total_rr / max(total_samples, 1),
+        "hits@1": hits_1 / max(total_samples, 1),
+        "hits@3": hits_3 / max(total_samples, 1),
+        "hits@10": hits_10 / max(total_samples, 1)
+    }
 
 def train_joint(config_path: str = "config/training_config.yaml",
                 embedder_ckpt: str = "checkpoints/stage1_embedder/embedder_l1_8_final.pt",
@@ -75,14 +106,14 @@ def train_joint(config_path: str = "config/training_config.yaml",
     # 2. Load Checkpoints if available
     embedder_path = Path(embedder_ckpt)
     if embedder_path.exists():
-        print(f"Loading TextEmbedder checkpoint: {embedder_path}")
+        print(f"Loading Stage 1A TextEmbedder checkpoint: {embedder_path}")
         embedder.load_state_dict(torch.load(embedder_path, map_location="cpu"))
     else:
         print(f"[INFO] No Stage 1A checkpoint found at {embedder_path}, initializing from backbone base.")
 
     core_path = Path(core_ckpt)
     if core_path.exists():
-        print(f"Loading RelationalCore checkpoint: {core_path}")
+        print(f"Loading Stage 1B RelationalCore checkpoint: {core_path}")
         core.load_state_dict(torch.load(core_path, map_location="cpu"))
     else:
         print(f"[INFO] No Stage 1B checkpoint found at {core_path}, initializing from backbone base.")
@@ -124,6 +155,7 @@ def train_joint(config_path: str = "config/training_config.yaml",
         full_dataset, [train_size, val_size],
         generator=torch.Generator().manual_seed(config["data"].get("seed", 42))
     )
+    print(f"Dataset split: {train_size:,} train triples | {val_size:,} validation triples ({config['data']['eval_split']*100:.0f}%)")
 
     collator = SimKGCCollator(tokenizer=tokenizer, max_seq_length=max_seq_length, concept_to_idx=concept_to_idx)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collator, drop_last=True)
@@ -142,7 +174,7 @@ def train_joint(config_path: str = "config/training_config.yaml",
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"\nStarting Assembled Model Joint Training ({epochs} epochs, {len(train_loader)} steps/epoch)...")
-    best_val_loss = float("inf")
+    best_mrr = -1.0
 
     for epoch in range(epochs):
         model.train()
@@ -177,18 +209,23 @@ def train_joint(config_path: str = "config/training_config.yaml",
             if (step + 1) % 50 == 0:
                 print(f"Epoch [{epoch+1}/{epochs}] Step [{step+1}/{len(train_loader)}] - Loss: {total_loss / (step + 1):.4f}")
 
-        # Evaluate on validation split
-        val_loss = evaluate_model(model, val_loader, device, output_dim)
-        print(f"--> Epoch [{epoch+1}/{epochs}] Validation Loss: {val_loss:.4f}")
+        # Dedicated Validation Evaluation
+        metrics = evaluate_model(model, val_loader, device, output_dim, temperature)
+        print(f"\n---> [Stage 2 End-to-End Validation - Epoch {epoch+1}/{epochs}]")
+        print(f"     • Val Loss:        {metrics['val_loss']:.4f}")
+        print(f"     • End-to-End MRR:  {metrics['mrr']:.4f}")
+        print(f"     • Hits@1:          {metrics['hits@1']*100:.2f}%")
+        print(f"     • Hits@3:          {metrics['hits@3']*100:.2f}%")
+        print(f"     • Hits@10:         {metrics['hits@10']*100:.2f}%\n")
 
         # Save epoch checkpoint
         ckpt_file = output_dir / f"assembled_epoch_{epoch+1}.pt"
         torch.save(model.state_dict(), ckpt_file)
         
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
+        if metrics["mrr"] > best_mrr:
+            best_mrr = metrics["mrr"]
             torch.save(model.state_dict(), output_dir / "simkgc_model.pt")
-            print(f"  ★ New best model checkpoint saved (Val Loss: {best_val_loss:.4f})")
+            print(f"  ★ New best model checkpoint saved (MRR: {best_mrr:.4f})")
 
     # Save tokenizer files to checkpoint dir
     tokenizer.save_pretrained(str(output_dir))

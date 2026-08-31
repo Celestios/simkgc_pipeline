@@ -3,6 +3,7 @@
 Teacher Embedder for SimKGC Pipeline.
 Uses BAAI/bge-m3 (560M parameters) to pre-encode concept terms into high-quality
 256-dimensional normalized vectors with incremental disk persistence and resume support.
+Supports downloading precomputed embeddings directly from Hugging Face Hub.
 """
 
 import os
@@ -35,6 +36,40 @@ class BGEConceptProjector(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         projected = self.projection(x)
         return F.normalize(projected, p=2, dim=-1)
+
+def try_download_from_hf(
+    repo_id: str,
+    output_npy_path: Path,
+    output_dict_path: Path
+) -> bool:
+    """Attempts to download precomputed teacher targets directly from Hugging Face Hub."""
+    try:
+        from huggingface_hub import hf_hub_download
+        print(f"\n[Teacher Embedder] Checking for pre-encoded targets on Hugging Face: {repo_id}...")
+        
+        output_npy_path.parent.mkdir(parents=True, exist_ok=True)
+        output_dict_path.parent.mkdir(parents=True, exist_ok=True)
+
+        npy_file = hf_hub_download(
+            repo_id=repo_id,
+            filename=output_npy_path.name,
+            local_dir=str(output_npy_path.parent),
+            local_dir_use_symlinks=False
+        )
+        dict_file = hf_hub_download(
+            repo_id=repo_id,
+            filename=output_dict_path.name,
+            local_dir=str(output_dict_path.parent),
+            local_dir_use_symlinks=False
+        )
+
+        if Path(npy_file).exists() and Path(dict_file).exists():
+            size_mb = Path(npy_file).stat().st_size / (1024 * 1024)
+            print(f"✓ Successfully downloaded pre-encoded targets from Hugging Face ({size_mb:.2f} MB)")
+            return True
+    except Exception as e:
+        print(f"[Teacher Embedder] Could not fetch from Hugging Face ({e}). Proceeding to local GPU encoding.")
+    return False
 
 def extract_bge_teacher_embeddings(
     concepts: List[str],
@@ -162,9 +197,20 @@ if __name__ == "__main__":
     parser.add_argument("--out-npy", default="cache/bge_m3_concept_targets.npy", help="Output .npy path")
     parser.add_argument("--out-dict", default="cache/concepts_dict.json", help="Output concepts JSON path")
     parser.add_argument("--batch-size", type=int, default=2048, help="Batch size for GPU inference")
+    parser.add_argument("--from-hf", default=None, help="Optional Hugging Face repo ID to download pre-encoded targets from")
+    parser.add_argument("--force-recompute", action="store_true", help="Force recomputation even if HF repo is given")
     parser.add_argument("--max-concepts", type=int, default=None, help="Optional concept limit")
     args = parser.parse_args()
     
+    out_npy = Path(args.out_npy)
+    out_dict = Path(args.out_dict)
+    
+    # 1. Option to download pre-encoded concept vectors from Hugging Face
+    if args.from_hf and not args.force_recompute:
+        if try_download_from_hf(args.from_hf, out_npy, out_dict):
+            sys.exit(0)
+            
+    # 2. Local GPU encoding
     data_path = Path(args.data)
     if not data_path.exists():
         print(f"Error: Dataset {data_path} not found.")
@@ -185,7 +231,7 @@ if __name__ == "__main__":
         
     extract_bge_teacher_embeddings(
         concepts=concept_list,
-        output_npy_path=Path(args.out_npy),
-        output_dict_path=Path(args.out_dict),
+        output_npy_path=out_npy,
+        output_dict_path=out_dict,
         batch_size=args.batch_size
     )

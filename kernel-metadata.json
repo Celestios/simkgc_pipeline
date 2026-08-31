@@ -6,5 +6,6 @@
   "kernel_type": "script",
   "is_private": "true",
   "enable_gpu": "true",
+  "machine_shape": "gpuT4x2",
   "enable_internet": "true"
 }

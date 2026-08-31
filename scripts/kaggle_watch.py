@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Kaggle Cloud Job Manager & Live Log Monitor.
-Allows launching, monitoring live cloud status, streaming completed logs,
-and managing Kaggle GPU runs directly from your terminal.
+Allows launching 100% cloud execution on Kaggle GPU T4 x2, monitoring live cloud status,
+streaming completed logs, and managing Kaggle GPU runs directly from your terminal.
 """
 
 import os
@@ -24,10 +24,10 @@ def run_cmd(cmd: str) -> str:
     return (res.stdout or res.stderr).strip()
 
 def push_kernel():
-    print(f"[*] Pushing kernel '{KERNEL_ID}' to Kaggle cloud GPU...")
-    out = run_cmd("kaggle kernels push")
+    print(f"[*] Pushing kernel '{KERNEL_ID}' to Kaggle cloud on GPU T4 x2...")
+    out = run_cmd("kaggle kernels push -a gpuT4x2")
     print(out)
-    print("\n✓ Cloud GPU training started on Kaggle!")
+    print("\n✓ Cloud GPU (T4 x2) training started on Kaggle!")
     print(f"Live web console: https://www.kaggle.com/code/{KERNEL_ID}")
     print("Run: python scripts/kaggle_watch.py watch  (to monitor status in terminal)")
 
@@ -80,7 +80,7 @@ def stream_logs(interval: int = 5):
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Usage:")
-        print("  python scripts/kaggle_watch.py push     # Launch cloud execution")
+        print("  python scripts/kaggle_watch.py push     # Launch cloud execution on GPU T4 x2")
         print("  python scripts/kaggle_watch.py watch    # Monitor status & fetch logs")
         print("  python scripts/kaggle_watch.py status   # Check current cloud status")
         sys.exit(1)

@@ -1,6 +1,6 @@
 {
-  "id": "celestios/simkgc-pipeline",
-  "title": "SimKGC Pipeline Training",
+  "id": "khodaverdishahin/simkgc",
+  "title": "simKGC",
   "code_file": "simkgc_kaggle.py",
   "language": "python",
   "kernel_type": "script",

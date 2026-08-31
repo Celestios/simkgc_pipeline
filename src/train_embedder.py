@@ -3,10 +3,12 @@
 Stage 1 - Sub-Module A: Text Embedder Training & Dedicated Validation (Layers 1–8).
 Aligns surface text (Persian & English concepts) directly to 256-d BGE-M3 target space.
 Evaluates holdout concept texts on Cosine Similarity and In-Batch Top-1/Top-5 Retrieval.
+Includes auto-resume support from existing epoch checkpoints.
 """
 
 import os
 import sys
+import re
 import json
 import yaml
 import torch
@@ -80,15 +82,34 @@ def evaluate_embedder(embedder: nn.Module, val_loader: DataLoader, device: torch
         "top5_acc": top5_correct / max(total_samples, 1)
     }
 
+def find_latest_checkpoint(output_dir: Path) -> Tuple[Optional[Path], int]:
+    """Finds highest completed epoch checkpoint in output_dir."""
+    if not output_dir.exists():
+        return None, 0
+    epoch_files = list(output_dir.glob("embedder_epoch_*.pt"))
+    if not epoch_files:
+        return None, 0
+    epochs = []
+    for f in epoch_files:
+        match = re.search(r"embedder_epoch_(\d+)\.pt", f.name)
+        if match:
+            epochs.append((int(match.group(1)), f))
+    if not epochs:
+        return None, 0
+    epochs.sort(key=lambda x: x[0], reverse=True)
+    return epochs[0][1], epochs[0][0]
+
 def train_embedder(config_path: str = "config/training_config.yaml",
                    batch_size: Optional[int] = None,
                    epochs: Optional[int] = None,
                    lr: Optional[float] = None,
                    temperature: Optional[float] = None,
                    alpha: Optional[float] = None,
-                   val_split: float = 0.15):
+                   val_split: float = 0.15,
+                   resume: bool = True):
     """
     Trains TextEmbedder (Layers 1–8) with dedicated holdout validation & best-checkpoint selection.
+    Automatically resumes from latest saved epoch checkpoint if available.
     """
     config_p = Path(config_path)
     config = {}
@@ -130,6 +151,19 @@ def train_embedder(config_path: str = "config/training_config.yaml",
 
     tokenizer = AutoTokenizer.from_pretrained(backbone_name)
     embedder = TextEmbedder(backbone_name=backbone_name, output_dim=output_dim, split_layer=8)
+
+    # Auto-resume from latest epoch checkpoint
+    start_epoch = 0
+    if resume:
+        latest_ckpt, last_epoch = find_latest_checkpoint(output_dir)
+        if latest_ckpt and latest_ckpt.exists():
+            print(f"[RESUME] Found existing checkpoint: {latest_ckpt} (Epoch {last_epoch})")
+            embedder.load_state_dict(torch.load(latest_ckpt, map_location="cpu"))
+            start_epoch = last_epoch
+            if start_epoch >= epochs:
+                print(f"[INFO] Stage 1A already trained up to Epoch {start_epoch} (Target: {epochs}).")
+                print(f"To train further, increase num_train_epochs in config or pass --epochs {start_epoch + 2}.")
+
     embedder.to(device)
 
     # Train / Validation Split
@@ -162,10 +196,17 @@ def train_embedder(config_path: str = "config/training_config.yaml",
     scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=int(total_steps * 0.1), num_training_steps=total_steps)
     criterion = SimKGCDistillationLoss(temperature=temperature, alpha=alpha)
 
-    print(f"\nStarting Text Embedder training for {epochs} epochs ({len(train_loader)} steps/epoch)...")
+    # Fast-forward scheduler if resuming
+    if start_epoch > 0:
+        steps_done = start_epoch * len(train_loader)
+        for _ in range(steps_done):
+            scheduler.step()
+        print(f"[RESUME] Advanced scheduler by {steps_done} steps (Epoch {start_epoch}/{epochs}).")
+
+    print(f"\nStarting Text Embedder training from Epoch {start_epoch+1} to {epochs} ({len(train_loader)} steps/epoch)...")
     best_cosine_sim = -1.0
 
-    for epoch in range(epochs):
+    for epoch in range(start_epoch, epochs):
         embedder.train()
         total_loss = 0.0
         for step, (input_ids, attention_mask, targets) in enumerate(train_loader):
@@ -206,7 +247,24 @@ def train_embedder(config_path: str = "config/training_config.yaml",
             torch.save(embedder.state_dict(), best_path)
             print(f"  ★ New best TextEmbedder saved to {best_path} (Cosine Sim: {best_cosine_sim:.4f})")
 
+    final_path = output_dir / "embedder_l1_8_final.pt"
+    if not final_path.exists() and (output_dir / f"embedder_epoch_{epochs}.pt").exists():
+        torch.save(embedder.state_dict(), final_path)
+
     print(f"\n[DONE] Stage 1A complete! Best TextEmbedder saved at: {output_dir / 'embedder_l1_8_final.pt'}")
 
 if __name__ == "__main__":
-    train_embedder()
+    import argparse
+    parser = argparse.ArgumentParser(description="Train TextEmbedder (Layers 1-8)")
+    parser.add_argument("--epochs", type=int, default=None, help="Total training epochs")
+    parser.add_argument("--batch-size", type=int, default=None, help="Batch size")
+    parser.add_argument("--lr", type=float, default=None, help="Learning rate")
+    parser.add_argument("--no-resume", action="store_true", help="Do not resume from existing checkpoint")
+    args = parser.parse_args()
+
+    train_embedder(
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        lr=args.lr,
+        resume=not args.no_resume
+    )

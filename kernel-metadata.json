@@ -1,0 +1,10 @@
+{
+  "id": "celestios/simkgc-pipeline",
+  "title": "SimKGC Pipeline Training",
+  "code_file": "simkgc_kaggle.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": "true",
+  "enable_gpu": "true",
+  "enable_internet": "true"
+}

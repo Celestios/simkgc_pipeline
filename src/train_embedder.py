@@ -2,7 +2,7 @@
 """
 Stage 1 - Sub-Module A: Text Embedder Training & Dedicated Validation (Layers 1–8).
 Aligns surface text (Persian & English concepts) directly to 256-d BGE-M3 target space.
-Supports auto-resuming from local checkpoints and syncing to/from Hugging Face Hub.
+Supports auto-resuming from local checkpoints and syncing immediately to Hugging Face Hub.
 """
 
 import os
@@ -84,7 +84,7 @@ def train_embedder(config_path: str = "config/training_config.yaml",
                    hf_repo: Optional[str] = None,
                    hf_token: Optional[str] = None):
     """
-    Trains TextEmbedder (Layers 1–8) with holdout validation, local/HF resume, and HF upload.
+    Trains TextEmbedder (Layers 1–8) with holdout validation, auto-resume, and instant HF upload on checkpoint.
     """
     config_p = Path(config_path)
     config = {}
@@ -95,6 +95,7 @@ def train_embedder(config_path: str = "config/training_config.yaml",
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[STAGE 1A: Text Embedder] Using device: {device}")
 
+    target_hf_repo = hf_repo or from_hf or config.get("distillation", {}).get("hf_repo") or "Celestios/Persian-simkgc-256d"
     backbone_name = config.get("model", {}).get("backbone_name", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
     output_dim = config.get("model", {}).get("output_dimensions", [256])[0]
     batch_size = batch_size or config.get("training", {}).get("batch_size", 512)
@@ -132,12 +133,11 @@ def train_embedder(config_path: str = "config/training_config.yaml",
             embedder.load_state_dict(torch.load(latest_ckpt, map_location="cpu"))
             start_epoch = last_epoch
         elif from_hf:
-            # Download from Hugging Face
             hf_ckpt = download_from_hf("embedder_l1_8_final.pt", output_dir, repo_id=from_hf, token=hf_token)
             if hf_ckpt and hf_ckpt.exists():
                 print(f"[RESUME: Hugging Face] Loaded from {from_hf}: {hf_ckpt}")
                 embedder.load_state_dict(torch.load(hf_ckpt, map_location="cpu"))
-                start_epoch = 0  # Pretrained weights loaded for further tuning
+                start_epoch = 0
 
     embedder.to(device)
 
@@ -220,17 +220,20 @@ def train_embedder(config_path: str = "config/training_config.yaml",
             torch.save(embedder.state_dict(), best_path)
             print(f"  ★ New best TextEmbedder saved to {best_path} (Cosine Sim: {best_cosine_sim:.4f})")
 
+            # Instant upload to Hugging Face on every best checkpoint
+            if push_to_hf or os.environ.get("HF_TOKEN"):
+                upload_file_to_hf(best_path, path_in_repo="embedder_l1_8_final.pt", repo_id=target_hf_repo, token=hf_token,
+                                  commit_message=f"Stage 1A TextEmbedder (Epoch {epoch+1}, CosSim: {best_cosine_sim:.4f})")
+
     final_path = output_dir / "embedder_l1_8_final.pt"
     if not final_path.exists() and (output_dir / f"embedder_epoch_{epochs}.pt").exists():
         torch.save(embedder.state_dict(), final_path)
 
     print(f"\n[DONE] Stage 1A complete! Best TextEmbedder saved at: {final_path}")
 
-    # 2. Upload to Hugging Face if enabled
-    target_hf_repo = hf_repo or from_hf or config.get("distillation", {}).get("hf_repo")
-    if (push_to_hf or target_hf_repo) and final_path.exists():
-        repo = target_hf_repo or "Celestios/Persian-simkgc-256d"
-        upload_file_to_hf(final_path, path_in_repo="embedder_l1_8_final.pt", repo_id=repo, token=hf_token)
+    if (push_to_hf or os.environ.get("HF_TOKEN")) and final_path.exists():
+        upload_file_to_hf(final_path, path_in_repo="embedder_l1_8_final.pt", repo_id=target_hf_repo, token=hf_token,
+                          commit_message="Stage 1A TextEmbedder Final")
 
 if __name__ == "__main__":
     import argparse

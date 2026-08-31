@@ -2,7 +2,7 @@
 """
 Stage 1 - Sub-Module B: Relational Core Training & Dedicated Validation (Layers 9–12).
 Learns pure vector manifold graph reasoning (v_h* + r -> v_t*) directly from BGE-M3 teacher targets.
-Supports auto-resuming from local checkpoints and syncing to/from Hugging Face Hub.
+Supports auto-resuming from local checkpoints and syncing immediately to Hugging Face Hub.
 """
 
 import os
@@ -91,7 +91,7 @@ def train_core(config_path: str = "config/training_config.yaml",
                hf_repo: Optional[str] = None,
                hf_token: Optional[str] = None):
     """
-    Trains RelationalCore (Layers 9–12) with holdout validation, local/HF resume, and HF upload.
+    Trains RelationalCore (Layers 9–12) with holdout validation, auto-resume, and instant HF upload on checkpoint.
     """
     config_p = Path(config_path)
     config = {}
@@ -102,6 +102,7 @@ def train_core(config_path: str = "config/training_config.yaml",
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[STAGE 1B: Relational Core] Using device: {device}")
 
+    target_hf_repo = hf_repo or from_hf or config.get("distillation", {}).get("hf_repo") or "Celestios/Persian-simkgc-256d"
     backbone_name = config.get("model", {}).get("backbone_name", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
     output_dim = config.get("model", {}).get("output_dimensions", [256])[0]
     batch_size = batch_size or config.get("training", {}).get("batch_size", 512)
@@ -255,17 +256,20 @@ def train_core(config_path: str = "config/training_config.yaml",
             torch.save(core.state_dict(), best_path)
             print(f"  ★ New best RelationalCore saved to {best_path} (MRR: {best_mrr:.4f})")
 
+            # Instant upload to Hugging Face on every best checkpoint
+            if push_to_hf or os.environ.get("HF_TOKEN"):
+                upload_file_to_hf(best_path, path_in_repo="relational_core_l9_12_final.pt", repo_id=target_hf_repo, token=hf_token,
+                                  commit_message=f"Stage 1B RelationalCore (Epoch {epoch+1}, MRR: {best_mrr:.4f})")
+
     final_path = output_dir / "relational_core_l9_12_final.pt"
     if not final_path.exists() and (output_dir / f"core_epoch_{epochs}.pt").exists():
         torch.save(core.state_dict(), final_path)
 
     print(f"\n[DONE] Stage 1B complete! Best RelationalCore saved at: {final_path}")
 
-    # 2. Upload to Hugging Face if enabled
-    target_hf_repo = hf_repo or from_hf or config.get("distillation", {}).get("hf_repo")
-    if (push_to_hf or target_hf_repo) and final_path.exists():
-        repo = target_hf_repo or "Celestios/Persian-simkgc-256d"
-        upload_file_to_hf(final_path, path_in_repo="relational_core_l9_12_final.pt", repo_id=repo, token=hf_token)
+    if (push_to_hf or os.environ.get("HF_TOKEN")) and final_path.exists():
+        upload_file_to_hf(final_path, path_in_repo="relational_core_l9_12_final.pt", repo_id=target_hf_repo, token=hf_token,
+                          commit_message="Stage 1B RelationalCore Final")
 
 if __name__ == "__main__":
     import argparse

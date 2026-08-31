@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Stage 2 - Assembled Model Joint Fine-Tuning & Production Calibration.
+Stage 2 - Assembled Model Joint Fine-Tuning & Automated Production Export.
 Loads Stage 1A (TextEmbedder) and Stage 1B (RelationalCore) checkpoints,
-assembles them into AssembledBiEncoder, and performs low-LR end-to-end training.
-Supports auto-resuming from local checkpoints and syncing to/from Hugging Face Hub.
+assembles them into AssembledBiEncoder, performs low-LR end-to-end training,
+and immediately executes production export and uploads all assets to Hugging Face Hub.
 """
 
 import os
@@ -27,6 +27,7 @@ from src.model.modular_encoder import TextEmbedder, RelationalCore, AssembledBiE
 from src.model.loss import SimKGCMatryoshkaLoss, SimKGCDistillationLoss
 from src.data.dataset import SimKGCDataset, SimKGCCollator
 from src.utils.checkpoint import find_latest_local_checkpoint, download_from_hf, upload_file_to_hf
+from src.export import run_production_export
 
 def evaluate_model(model: nn.Module, val_loader: DataLoader, device: torch.device, output_dim: int, temperature: float = 0.05) -> Dict[str, float]:
     """Evaluates AssembledBiEncoder on holdout graph triples."""
@@ -80,12 +81,13 @@ def train_joint(config_path: str = "config/training_config.yaml",
                 batch_size: Optional[int] = None,
                 lr: Optional[float] = None,
                 resume: bool = True,
+                auto_export: bool = True,
                 from_hf: Optional[str] = None,
                 push_to_hf: bool = False,
                 hf_repo: Optional[str] = None,
                 hf_token: Optional[str] = None):
     """
-    Assembles TextEmbedder and RelationalCore, and calibrates full model end-to-end.
+    Assembles TextEmbedder and RelationalCore, calibrates model, and immediately executes production export.
     """
     with open(config_path, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
@@ -93,6 +95,7 @@ def train_joint(config_path: str = "config/training_config.yaml",
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[STAGE 2: Joint Assembly & Fine-Tuning] Using device: {device}")
 
+    target_hf_repo = hf_repo or from_hf or config.get("export", {}).get("hf_repo") or "Celestios/Persian-simkgc-256d"
     backbone_name = config["model"]["backbone_name"]
     output_dim = config["model"]["output_dimensions"][0]
     batch_size = batch_size or config["training"]["batch_size"]
@@ -102,7 +105,9 @@ def train_joint(config_path: str = "config/training_config.yaml",
     max_seq_length = config["model"].get("max_seq_length", 64)
 
     output_dir = Path(config["export"].get("checkpoint_dir", "checkpoints/simkgc_fa_en"))
+    export_dir = Path("exports")
     output_dir.mkdir(parents=True, exist_ok=True)
+    export_dir.mkdir(parents=True, exist_ok=True)
 
     # 1. Initialize Sub-Networks
     tokenizer = AutoTokenizer.from_pretrained(backbone_name)
@@ -156,21 +161,17 @@ def train_joint(config_path: str = "config/training_config.yaml",
     distill_enabled = distill_cfg.get("enabled", False)
     teacher_embeddings = None
     concept_to_idx = None
+    teacher_cache_path = Path(distill_cfg.get("teacher_cache_path", "cache/bge_m3_concept_targets.npy"))
+    teacher_dict_path = Path(distill_cfg.get("teacher_dict_path", "cache/concepts_dict.json"))
 
-    if distill_enabled:
-        teacher_cache_path = Path(distill_cfg.get("teacher_cache_path", "cache/bge_m3_concept_targets.npy"))
-        teacher_dict_path = Path(distill_cfg.get("teacher_dict_path", "cache/concepts_dict.json"))
-
-        if teacher_cache_path.exists() and teacher_dict_path.exists():
-            print(f"[DISTILLATION] Loading teacher targets from {teacher_cache_path}")
-            teacher_npy = np.load(teacher_cache_path)
-            teacher_embeddings = torch.from_numpy(teacher_npy).float()
-            with open(teacher_dict_path, "r", encoding="utf-8") as f:
-                teacher_concepts = json.load(f)
-            concept_to_idx = {c: i for i, c in enumerate(teacher_concepts)}
-            criterion = SimKGCDistillationLoss(temperature=temperature, alpha=float(distill_cfg.get("alpha", 0.5)))
-        else:
-            criterion = SimKGCMatryoshkaLoss(temperature=temperature, primary_dim=output_dim)
+    if distill_enabled and teacher_cache_path.exists() and teacher_dict_path.exists():
+        print(f"[DISTILLATION] Loading teacher targets from {teacher_cache_path}")
+        teacher_npy = np.load(teacher_cache_path)
+        teacher_embeddings = torch.from_numpy(teacher_npy).float()
+        with open(teacher_dict_path, "r", encoding="utf-8") as f:
+            teacher_concepts = json.load(f)
+        concept_to_idx = {c: i for i, c in enumerate(teacher_concepts)}
+        criterion = SimKGCDistillationLoss(temperature=temperature, alpha=float(distill_cfg.get("alpha", 0.5)))
     else:
         criterion = SimKGCMatryoshkaLoss(temperature=temperature, primary_dim=output_dim)
 
@@ -259,6 +260,11 @@ def train_joint(config_path: str = "config/training_config.yaml",
             torch.save(model.state_dict(), output_dir / "simkgc_model.pt")
             print(f"  ★ New best model checkpoint saved (MRR: {best_mrr:.4f})")
 
+            # Instant upload to Hugging Face on every best checkpoint
+            if push_to_hf or os.environ.get("HF_TOKEN"):
+                upload_file_to_hf(output_dir / "simkgc_model.pt", path_in_repo="simkgc_model.pt", repo_id=target_hf_repo, token=hf_token,
+                                  commit_message=f"Stage 2 simkgc_model.pt (Epoch {epoch+1}, MRR: {best_mrr:.4f})")
+
     final_model_path = output_dir / "simkgc_model.pt"
     if not final_model_path.exists() and (output_dir / f"assembled_epoch_{epochs}.pt").exists():
         torch.save(model.state_dict(), final_model_path)
@@ -267,21 +273,53 @@ def train_joint(config_path: str = "config/training_config.yaml",
     tokenizer.save_pretrained(str(output_dir))
     print(f"\n[DONE] Joint Assembly training complete! Final model saved to: {final_model_path}")
 
-    # 9. Upload to Hugging Face if enabled
-    target_hf_repo = hf_repo or from_hf or config.get("export", {}).get("hf_repo")
-    if (push_to_hf or target_hf_repo) and final_model_path.exists():
-        repo = target_hf_repo or "Celestios/Persian-simkgc-256d"
-        upload_file_to_hf(final_model_path, path_in_repo="simkgc_model.pt", repo_id=repo, token=hf_token)
+    # 9. Automated Production Export & Full Hub Release
+    if auto_export:
+        print("\n" + "=" * 70)
+        print("  AUTOMATIC PRODUCTION EXPORT (ONNX INT8 + 50k Binary + Relations)")
+        print("=" * 70)
+        run_production_export(
+            checkpoint_dir=output_dir,
+            data_files=data_files,
+            output_dir=export_dir,
+            max_concepts=config["export"].get("max_production_concepts", 50000),
+            fa_quota=config["export"].get("persian_quota", 15000),
+            en_quota=config["export"].get("english_quota", 35000),
+            teacher_cache_path=teacher_cache_path if teacher_cache_path.exists() else None,
+            teacher_dict_path=teacher_dict_path if teacher_dict_path.exists() else None
+        )
+
+    # 10. Upload all final release assets to Hugging Face Hub
+    if push_to_hf or os.environ.get("HF_TOKEN"):
+        print(f"\n[HF Release] Uploading full production release bundle to: {target_hf_repo}...")
+        files_to_sync = [
+            (final_model_path, "simkgc_model.pt"),
+            (export_dir / "simkgc_256d.onnx", "simkgc_256d.onnx"),
+            (export_dir / "simkgc_256d_int8.onnx", "simkgc_256d_int8.onnx"),
+            (export_dir / "concepts_256d_int8.bin", "concepts_256d_int8.bin"),
+            (export_dir / "concepts_dict.json", "concepts_dict.json"),
+            (export_dir / "relations_256d_int8.bin", "relations_256d_int8.bin"),
+            (export_dir / "relations_ontology.json", "relations_ontology.json"),
+            (export_dir / "relations_metadata.json", "relations_metadata.json"),
+            (export_dir / "tokenizer.json", "tokenizer.json"),
+            (export_dir / "tokenizer_config.json", "tokenizer_config.json"),
+            (export_dir / "vocab.txt", "vocab.txt"),
+            (export_dir / "special_tokens_map.json", "special_tokens_map.json")
+        ]
+        for src_f, dst_name in files_to_sync:
+            if src_f.exists():
+                upload_file_to_hf(src_f, path_in_repo=dst_name, repo_id=target_hf_repo, token=hf_token)
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="Stage 2 Joint Assembly Training")
+    parser = argparse.ArgumentParser(description="Stage 2 Joint Assembly Training & Production Export")
     parser.add_argument("--epochs", type=int, default=None, help="Total training epochs")
     parser.add_argument("--batch-size", type=int, default=None, help="Batch size")
     parser.add_argument("--lr", type=float, default=None, help="Learning rate")
     parser.add_argument("--embedder-ckpt", default=None, help="Path to Stage 1A TextEmbedder checkpoint")
     parser.add_argument("--core-ckpt", default=None, help="Path to Stage 1B RelationalCore checkpoint")
     parser.add_argument("--no-resume", action="store_true", help="Do not resume from existing checkpoint")
+    parser.add_argument("--no-export", action="store_true", help="Do not run production export automatically")
     parser.add_argument("--from-hf", default=None, help="Hugging Face repo ID to resume from")
     parser.add_argument("--push-to-hf", action="store_true", help="Push trained model to Hugging Face Hub")
     parser.add_argument("--hf-repo", default=None, help="Hugging Face repo ID to push to")
@@ -295,6 +333,7 @@ if __name__ == "__main__":
         embedder_ckpt=args.embedder_ckpt,
         core_ckpt=args.core_ckpt,
         resume=not args.no_resume,
+        auto_export=not args.no_export,
         from_hf=args.from_hf,
         push_to_hf=args.push_to_hf,
         hf_repo=args.hf_repo,

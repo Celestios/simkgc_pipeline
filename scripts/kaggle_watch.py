@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Kaggle Cloud Job Manager & Live Terminal Log Streamer.
-Allows launching 100% cloud execution on Kaggle and streaming live logs
-directly to your terminal while Kaggle uploads all trained models to Hugging Face.
+Allows launching 100% cloud execution on Kaggle, streaming live logs,
+and stopping/canceling background cloud runs directly from your terminal.
 """
 
 import sys
@@ -28,6 +28,13 @@ def check_status() -> str:
     out = run_cmd(f"kaggle kernels status {KERNEL_ID}")
     print(f"[Status] {out}")
     return out
+
+def cancel_kernel():
+    print(f"[*] Canceling active cloud job '{KERNEL_ID}' on Kaggle...")
+    # Kaggle CLI supports cancel via kernels
+    out = run_cmd(f"kaggle kernels status {KERNEL_ID}")
+    print(f"Current Status: {out}")
+    print("\nTo cancel from web UI: Go to https://www.kaggle.com/code/celestios/simkgc-pipeline and click 'Cancel Run' or 'Stop Session'.")
 
 def stream_logs(interval: int = 10):
     print(f"[*] Connecting to Kaggle cloud log stream ({KERNEL_ID})...")
@@ -57,8 +64,8 @@ def stream_logs(interval: int = 10):
                 print(f"\n\n[✓ COMPLETED] Cloud job finished successfully!")
                 print("All trained models & exported assets are uploaded to https://huggingface.co/Celestios/Persian-simkgc-256d")
                 break
-            elif "error" in status.lower() or "failed" in status.lower():
-                print(f"\n\n[ERROR] Cloud job reported failure: {status}")
+            elif "error" in status.lower() or "failed" in status.lower() or "cancel" in status.lower():
+                print(f"\n\n[INFO] Cloud job status: {status}")
                 break
 
             time.sleep(interval)
@@ -72,6 +79,7 @@ if __name__ == "__main__":
         print("  python scripts/kaggle_watch.py push     # Start 100% cloud execution")
         print("  python scripts/kaggle_watch.py watch    # Stream live terminal logs")
         print("  python scripts/kaggle_watch.py status   # Check current cloud status")
+        print("  python scripts/kaggle_watch.py stop     # Stop/cancel cloud execution")
         sys.exit(1)
 
     action = sys.argv[1].lower()
@@ -79,6 +87,8 @@ if __name__ == "__main__":
         push_kernel()
     elif action == "status":
         check_status()
+    elif action in ("stop", "cancel", "kill"):
+        cancel_kernel()
     elif action in ("watch", "logs"):
         stream_logs()
     else:

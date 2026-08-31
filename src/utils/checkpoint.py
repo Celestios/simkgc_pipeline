@@ -2,9 +2,9 @@
 """
 Robust Checkpoint Management & Hugging Face Hub Synchronization.
 Features:
-  1. Automatic Exponential Backoff Retry (5 attempts) for all downloads & uploads.
-  2. Non-blocking Background Upload Threading to prevent network lag from interrupting training.
-  3. Resilient against browser/network disconnects in cloud notebook environments (Kaggle/Colab).
+  1. Automatic token resolution from arguments, environment, Kaggle Secrets, and ~/.cache/huggingface/token.
+  2. Automatic Exponential Backoff Retry (5 attempts) for all downloads & uploads.
+  3. Non-blocking Background Upload Threading to prevent network lag from interrupting training.
 """
 
 import os
@@ -21,6 +21,42 @@ except ImportError:
     HfApi = hf_hub_download = None
 
 DEFAULT_HF_REPO = "Celestios/Persian-simkgc-256d"
+
+def get_resolved_hf_token(explicit_token: Optional[str] = None) -> Optional[str]:
+    """Resolves Hugging Face API token from explicit arg, env, Kaggle Secrets, or local cache."""
+    if explicit_token and explicit_token.strip():
+        return explicit_token.strip()
+    
+    # 1. Environment Variable
+    env_token = os.environ.get("HF_TOKEN")
+    if env_token and env_token.strip():
+        return env_token.strip()
+
+    # 2. Kaggle Secrets
+    try:
+        from kaggle_secrets import UserSecretsClient
+        user_secrets = UserSecretsClient()
+        sec = user_secrets.get_secret("HF_TOKEN")
+        if sec and sec.strip():
+            return sec.strip()
+    except Exception:
+        pass
+
+    # 3. Standard Hugging Face cache files
+    cache_paths = [
+        Path.home() / ".cache" / "huggingface" / "token",
+        Path.home() / ".huggingface" / "token"
+    ]
+    for cp in cache_paths:
+        if cp.exists():
+            try:
+                t = cp.read_text(encoding="utf-8").strip()
+                if t:
+                    return t
+            except Exception:
+                pass
+                
+    return None
 
 def find_latest_local_checkpoint(output_dir: Path, prefix: str = "epoch_") -> Tuple[Optional[Path], int]:
     """Finds highest completed epoch checkpoint in directory."""
@@ -51,7 +87,7 @@ def download_from_hf(
         print("[WARNING] huggingface_hub is not installed. Cannot download from HF.")
         return None
 
-    token = token or os.environ.get("HF_TOKEN")
+    resolved_token = get_resolved_hf_token(token)
     local_dir = Path(local_dir)
     local_dir.mkdir(parents=True, exist_ok=True)
 
@@ -62,13 +98,13 @@ def download_from_hf(
                 repo_id=repo_id,
                 filename=filename,
                 local_dir=str(local_dir),
-                token=token,
+                token=resolved_token,
                 local_dir_use_symlinks=False
             )
             p = Path(downloaded)
             if p.exists():
                 size_mb = p.stat().st_size / (1024 * 1024)
-                print(f"✓ Downloaded {p.name} ({size_mb:.2f} MB)")
+                print(f"[OK] Downloaded {p.name} ({size_mb:.2f} MB)")
                 return p
         except Exception as e:
             wait_time = 2 ** attempt
@@ -89,8 +125,12 @@ def _perform_upload(
     max_retries: int = 5
 ) -> bool:
     """Internal upload procedure with exponential backoff retries."""
-    token = token or os.environ.get("HF_TOKEN")
-    api = HfApi(token=token)
+    resolved_token = get_resolved_hf_token(token)
+    if not resolved_token:
+        print("[WARNING] No valid HF_TOKEN found. Cannot authenticate upload to Hugging Face.")
+        return False
+
+    api = HfApi(token=resolved_token)
     
     for attempt in range(1, max_retries + 1):
         try:
@@ -103,7 +143,7 @@ def _perform_upload(
                 repo_type="model",
                 commit_message=commit_msg
             )
-            print(f"✓ Successfully uploaded {path_in_repo} to Hugging Face!")
+            print(f"[OK] Successfully uploaded {path_in_repo} to Hugging Face!")
             return True
         except Exception as e:
             wait_time = 2 ** attempt

@@ -129,7 +129,7 @@ def extract_bge_teacher_embeddings(
             input_ids = inputs["input_ids"].to(device)
             attention_mask = inputs["attention_mask"].to(device)
             
-            with torch.inference_mode(), torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
+            with torch.inference_mode(), torch.amp.autocast("cuda", enabled=torch.cuda.is_available()):
                 outputs = model(input_ids=input_ids, attention_mask=attention_mask)
                 mask_expanded = attention_mask.unsqueeze(-1).expand(outputs.last_hidden_state.size()).float()
                 sum_emb = torch.sum(outputs.last_hidden_state * mask_expanded, dim=1)

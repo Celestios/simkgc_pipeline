@@ -2,13 +2,11 @@
 """
 Stage 1 - Sub-Module A: Text Embedder Training & Dedicated Validation (Layers 1–8).
 Aligns surface text (Persian & English concepts) directly to 256-d BGE-M3 target space.
-Evaluates holdout concept texts on Cosine Similarity and In-Batch Top-1/Top-5 Retrieval.
-Includes auto-resume support from existing epoch checkpoints.
+Supports auto-resuming from local checkpoints and syncing to/from Hugging Face Hub.
 """
 
 import os
 import sys
-import re
 import json
 import yaml
 import torch
@@ -28,15 +26,10 @@ if str(REPO_ROOT) not in sys.path:
 from src.model.modular_encoder import TextEmbedder
 from src.data.dataset import ConceptDataset, concept_collate_fn
 from src.model.loss import SimKGCDistillationLoss
+from src.utils.checkpoint import find_latest_local_checkpoint, download_from_hf, upload_file_to_hf
 
 def evaluate_embedder(embedder: nn.Module, val_loader: DataLoader, device: torch.device, criterion: nn.Module) -> Dict[str, float]:
-    """
-    Evaluates TextEmbedder on holdout validation concepts:
-      1. Mean Cosine Similarity vs Teacher Target
-      2. In-Batch Top-1 Retrieval Accuracy
-      3. In-Batch Top-5 Retrieval Accuracy
-      4. Validation Distillation Loss
-    """
+    """Evaluates TextEmbedder on holdout validation concepts."""
     embedder.eval()
     total_val_loss = 0.0
     total_cosine_sim = 0.0
@@ -57,19 +50,15 @@ def evaluate_embedder(embedder: nn.Module, val_loader: DataLoader, device: torch
             total_val_loss += loss.item()
             val_steps += 1
 
-            # 1. Cosine Similarity vs Target
             cos_sims = torch.sum(student_vecs * targets, dim=-1)
             total_cosine_sim += cos_sims.sum().item()
 
-            # 2. In-Batch Target Retrieval Ranking
             sim_matrix = torch.matmul(student_vecs, targets.T)
             labels = torch.arange(batch_size, device=device)
 
-            # Top-1
             top1_preds = torch.argmax(sim_matrix, dim=-1)
             top1_correct += (top1_preds == labels).sum().item()
 
-            # Top-5
             top5_preds = torch.topk(sim_matrix, k=min(5, batch_size), dim=-1).indices
             top5_correct += (top5_preds == labels.unsqueeze(1)).any(dim=-1).sum().item()
 
@@ -82,23 +71,6 @@ def evaluate_embedder(embedder: nn.Module, val_loader: DataLoader, device: torch
         "top5_acc": top5_correct / max(total_samples, 1)
     }
 
-def find_latest_checkpoint(output_dir: Path) -> Tuple[Optional[Path], int]:
-    """Finds highest completed epoch checkpoint in output_dir."""
-    if not output_dir.exists():
-        return None, 0
-    epoch_files = list(output_dir.glob("embedder_epoch_*.pt"))
-    if not epoch_files:
-        return None, 0
-    epochs = []
-    for f in epoch_files:
-        match = re.search(r"embedder_epoch_(\d+)\.pt", f.name)
-        if match:
-            epochs.append((int(match.group(1)), f))
-    if not epochs:
-        return None, 0
-    epochs.sort(key=lambda x: x[0], reverse=True)
-    return epochs[0][1], epochs[0][0]
-
 def train_embedder(config_path: str = "config/training_config.yaml",
                    batch_size: Optional[int] = None,
                    epochs: Optional[int] = None,
@@ -106,10 +78,13 @@ def train_embedder(config_path: str = "config/training_config.yaml",
                    temperature: Optional[float] = None,
                    alpha: Optional[float] = None,
                    val_split: float = 0.15,
-                   resume: bool = True):
+                   resume: bool = True,
+                   from_hf: Optional[str] = None,
+                   push_to_hf: bool = False,
+                   hf_repo: Optional[str] = None,
+                   hf_token: Optional[str] = None):
     """
-    Trains TextEmbedder (Layers 1–8) with dedicated holdout validation & best-checkpoint selection.
-    Automatically resumes from latest saved epoch checkpoint if available.
+    Trains TextEmbedder (Layers 1–8) with holdout validation, local/HF resume, and HF upload.
     """
     config_p = Path(config_path)
     config = {}
@@ -120,7 +95,6 @@ def train_embedder(config_path: str = "config/training_config.yaml",
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[STAGE 1A: Text Embedder] Using device: {device}")
 
-    # Hyperparameters from config with overrides
     backbone_name = config.get("model", {}).get("backbone_name", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
     output_dim = config.get("model", {}).get("output_dimensions", [256])[0]
     batch_size = batch_size or config.get("training", {}).get("batch_size", 512)
@@ -130,7 +104,6 @@ def train_embedder(config_path: str = "config/training_config.yaml",
     alpha = alpha or float(config.get("distillation", {}).get("alpha", 0.6))
     seed = config.get("data", {}).get("seed", 42)
 
-    # Paths
     teacher_cache = Path(config.get("distillation", {}).get("teacher_cache_path", "cache/bge_m3_concept_targets.npy"))
     teacher_dict = Path(config.get("distillation", {}).get("teacher_dict_path", "cache/concepts_dict.json"))
     output_dir = Path("checkpoints/stage1_embedder")
@@ -147,22 +120,24 @@ def train_embedder(config_path: str = "config/training_config.yaml",
     with open(teacher_dict, "r", encoding="utf-8") as f:
         concepts = json.load(f)
 
-    print(f"Loaded {len(concepts):,} concepts with {output_dim}-d target vectors.")
-
     tokenizer = AutoTokenizer.from_pretrained(backbone_name)
     embedder = TextEmbedder(backbone_name=backbone_name, output_dim=output_dim, split_layer=8)
 
-    # Auto-resume from latest epoch checkpoint
+    # 1. Resume Check: Local First, then Hugging Face
     start_epoch = 0
     if resume:
-        latest_ckpt, last_epoch = find_latest_checkpoint(output_dir)
+        latest_ckpt, last_epoch = find_latest_local_checkpoint(output_dir, prefix="embedder_epoch_")
         if latest_ckpt and latest_ckpt.exists():
-            print(f"[RESUME] Found existing checkpoint: {latest_ckpt} (Epoch {last_epoch})")
+            print(f"[RESUME: Local] Found checkpoint: {latest_ckpt} (Epoch {last_epoch})")
             embedder.load_state_dict(torch.load(latest_ckpt, map_location="cpu"))
             start_epoch = last_epoch
-            if start_epoch >= epochs:
-                print(f"[INFO] Stage 1A already trained up to Epoch {start_epoch} (Target: {epochs}).")
-                print(f"To train further, increase num_train_epochs in config or pass --epochs {start_epoch + 2}.")
+        elif from_hf:
+            # Download from Hugging Face
+            hf_ckpt = download_from_hf("embedder_l1_8_final.pt", output_dir, repo_id=from_hf, token=hf_token)
+            if hf_ckpt and hf_ckpt.exists():
+                print(f"[RESUME: Hugging Face] Loaded from {from_hf}: {hf_ckpt}")
+                embedder.load_state_dict(torch.load(hf_ckpt, map_location="cpu"))
+                start_epoch = 0  # Pretrained weights loaded for further tuning
 
     embedder.to(device)
 
@@ -196,7 +171,6 @@ def train_embedder(config_path: str = "config/training_config.yaml",
     scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=int(total_steps * 0.1), num_training_steps=total_steps)
     criterion = SimKGCDistillationLoss(temperature=temperature, alpha=alpha)
 
-    # Fast-forward scheduler if resuming
     if start_epoch > 0:
         steps_done = start_epoch * len(train_loader)
         for _ in range(steps_done):
@@ -229,7 +203,7 @@ def train_embedder(config_path: str = "config/training_config.yaml",
                 avg_loss = total_loss / (step + 1)
                 print(f"Epoch [{epoch+1}/{epochs}] Step [{step+1}/{len(train_loader)}] - Distill Loss: {avg_loss:.4f}")
 
-        # Dedicated Holdout Validation
+        # Validation
         metrics = evaluate_embedder(embedder, val_loader, device, criterion)
         print(f"\n---> [Stage 1A Validation - Epoch {epoch+1}/{epochs}]")
         print(f"     • Val Loss:           {metrics['val_loss']:.4f}")
@@ -237,7 +211,6 @@ def train_embedder(config_path: str = "config/training_config.yaml",
         print(f"     • In-Batch Top-1 Acc: {metrics['top1_acc']*100:.2f}%")
         print(f"     • In-Batch Top-5 Acc: {metrics['top5_acc']*100:.2f}%\n")
 
-        # Save epoch checkpoint
         checkpoint_path = output_dir / f"embedder_epoch_{epoch+1}.pt"
         torch.save(embedder.state_dict(), checkpoint_path)
 
@@ -251,7 +224,13 @@ def train_embedder(config_path: str = "config/training_config.yaml",
     if not final_path.exists() and (output_dir / f"embedder_epoch_{epochs}.pt").exists():
         torch.save(embedder.state_dict(), final_path)
 
-    print(f"\n[DONE] Stage 1A complete! Best TextEmbedder saved at: {output_dir / 'embedder_l1_8_final.pt'}")
+    print(f"\n[DONE] Stage 1A complete! Best TextEmbedder saved at: {final_path}")
+
+    # 2. Upload to Hugging Face if enabled
+    target_hf_repo = hf_repo or from_hf or config.get("distillation", {}).get("hf_repo")
+    if (push_to_hf or target_hf_repo) and final_path.exists():
+        repo = target_hf_repo or "Celestios/Persian-simkgc-256d"
+        upload_file_to_hf(final_path, path_in_repo="embedder_l1_8_final.pt", repo_id=repo, token=hf_token)
 
 if __name__ == "__main__":
     import argparse
@@ -260,11 +239,19 @@ if __name__ == "__main__":
     parser.add_argument("--batch-size", type=int, default=None, help="Batch size")
     parser.add_argument("--lr", type=float, default=None, help="Learning rate")
     parser.add_argument("--no-resume", action="store_true", help="Do not resume from existing checkpoint")
+    parser.add_argument("--from-hf", default=None, help="Hugging Face repo ID to resume from")
+    parser.add_argument("--push-to-hf", action="store_true", help="Push trained model to Hugging Face Hub")
+    parser.add_argument("--hf-repo", default=None, help="Hugging Face repo ID to push to")
+    parser.add_argument("--hf-token", default=None, help="Hugging Face API token")
     args = parser.parse_args()
 
     train_embedder(
         epochs=args.epochs,
         batch_size=args.batch_size,
         lr=args.lr,
-        resume=not args.no_resume
+        resume=not args.no_resume,
+        from_hf=args.from_hf,
+        push_to_hf=args.push_to_hf,
+        hf_repo=args.hf_repo,
+        hf_token=args.hf_token
     )

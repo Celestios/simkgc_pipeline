@@ -127,22 +127,13 @@ def main():
         "pip install -q torch transformers accelerate datasets onnx onnxruntime safetensors pyyaml requests tqdm huggingface_hub"
     )
 
-    # 3. Clean & Prepare Knowledge Graph Data
+    # 3. Clean & Prepare Knowledge Graph Data (Instant Local Processing)
     raw_dir = base_dir / "data" / "raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
-    subset_path = raw_dir / "conceptnet_subset.json"
-    
-    if not subset_path.exists():
-        matches = list(Path("/kaggle/working").rglob("conceptnet_subset.json"))
-        if matches and matches[0] != subset_path:
-            shutil.move(str(matches[0]), str(subset_path))
-            print(f"Moved ConceptNet subset to: {subset_path}", flush=True)
-        else:
-            run_step("Download ConceptNet (~450MB)", "python src/data/download_conceptnet_subset.py --full", cwd=base_dir)
 
     run_step(
-        "3. Merge Base Dataset (HF) with Git Synthetic Phrases & Generate Inverses",
-        f"python src/data/cleaner.py --inputs data/raw/conceptnet_clean.json data/raw/conceptnet_subset.json data/synthetic/all_triplets_deduped.json --output data/raw/conceptnet_clean.json --min-weight 0.5 --from-hf {HF_REPO}",
+        "3. Canonicalize Synthetic Dataset & Generate Inverses",
+        "python src/data/cleaner.py --inputs data/synthetic/all_triplets_deduped.json --output data/raw/conceptnet_clean.json --min-weight 0.5",
         cwd=base_dir
     )
 

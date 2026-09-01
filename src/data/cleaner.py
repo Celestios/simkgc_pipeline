@@ -7,6 +7,7 @@ bidirectional inverse graph links.
 """
 
 import os
+import sys
 import re
 import json
 import argparse
@@ -15,6 +16,9 @@ from typing import List, Dict, Set, Tuple, Optional
 
 # Add project root to sys.path
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 from src.data.relations import (
     CANONICAL_RELATIONS,
     CANONICAL_RELATION_NAMES,

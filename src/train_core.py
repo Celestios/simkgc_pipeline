@@ -16,14 +16,14 @@ import numpy as np
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 from torch.utils.data import DataLoader, random_split
-from transformers import get_cosine_schedule_with_warmup
+from transformers import AutoTokenizer, get_cosine_schedule_with_warmup
 
 # Add project root to sys.path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from src.model.modular_encoder import RelationalCore
+from src.model.modular_encoder import RelationalCore, TextEmbedder
 from src.data.dataset import VectorTripleDataset, vector_triple_collate_fn
 from src.data.relations import CANONICAL_RELATIONS
 from src.utils.checkpoint import find_latest_local_checkpoint, download_from_hf, upload_file_to_hf
@@ -147,6 +147,42 @@ def train_core(config_path: str = "config/training_config.yaml",
                     all_triples.extend(data)
                 elif isinstance(data, dict) and "triples" in data:
                     all_triples.extend(data["triples"])
+
+    # Automatically encode any new synthetic concepts not in base teacher dictionary
+    unique_in_triples = set()
+    for t in all_triples:
+        if "head" in t and "tail" in t:
+            unique_in_triples.add(t["head"])
+            unique_in_triples.add(t["tail"])
+
+    missing_concepts = [c for c in unique_in_triples if c not in concept_to_idx]
+    if missing_concepts:
+        print(f"[STAGE 1B] Encoding {len(missing_concepts):,} new synthetic phrase concepts with TextEmbedder...")
+        tokenizer = AutoTokenizer.from_pretrained(backbone_name)
+        embedder_p = Path("checkpoints/stage1_embedder/embedder_l1_8_final.pt")
+        if not embedder_p.exists() and from_hf:
+            download_from_hf("embedder_l1_8_final.pt", embedder_p.parent, repo_id=from_hf, token=hf_token)
+
+        embedder = TextEmbedder(backbone_name=backbone_name, output_dim=output_dim, split_layer=8)
+        if embedder_p.exists():
+            embedder.load_state_dict(torch.load(embedder_p, map_location="cpu"))
+        embedder.eval().to(device)
+
+        new_vectors = []
+        with torch.no_grad():
+            for i in range(0, len(missing_concepts), 512):
+                chunk = missing_concepts[i:i + 512]
+                enc = tokenizer(chunk, padding=True, truncation=True, max_length=64, return_tensors="pt")
+                vecs = embedder(enc["input_ids"].to(device), enc["attention_mask"].to(device))
+                new_vectors.append(vecs.cpu())
+
+        if new_vectors:
+            new_vecs_tensor = torch.cat(new_vectors, dim=0)
+            curr_len = len(concepts)
+            for i, c in enumerate(missing_concepts):
+                concept_to_idx[c] = curr_len + i
+            teacher_embeddings = torch.cat([teacher_embeddings, new_vecs_tensor], dim=0)
+            print(f"[STAGE 1B] Integrated all {len(missing_concepts):,} new concepts into 256d vector space.")
 
     full_dataset = VectorTripleDataset(all_triples, teacher_embeddings, concept_to_idx, relation_to_idx)
     print(f"Valid vector triples: {len(full_dataset):,}")

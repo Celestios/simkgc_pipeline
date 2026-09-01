@@ -127,13 +127,18 @@ def main():
         "pip install -q torch transformers accelerate datasets onnx onnxruntime safetensors pyyaml requests tqdm huggingface_hub"
     )
 
-    # 3. Clean & Prepare Knowledge Graph Data (Instant Local Processing)
+    # 3. Clean & Prepare Knowledge Graph Data (1.6M Base from HF + Git Synthetic Phrases)
     raw_dir = base_dir / "data" / "raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
+    clean_path = raw_dir / "conceptnet_clean.json"
+    
+    if not clean_path.exists():
+        print(f"[HF Sync] Pulling 1.6M base dataset from https://huggingface.co/{HF_REPO}...", flush=True)
+        download_from_hf("conceptnet_clean.json", raw_dir, repo_id=HF_REPO, token=HF_TOKEN)
 
     run_step(
-        "3. Canonicalize Synthetic Dataset & Generate Inverses",
-        "python src/data/cleaner.py --inputs data/synthetic/all_triplets_deduped.json --output data/raw/conceptnet_clean.json --min-weight 0.5",
+        "3. Merge 1.6M Base Dataset (HF) with Git Synthetic Phrases & Generate Inverses",
+        "python src/data/cleaner.py --inputs data/raw/conceptnet_clean.json data/synthetic/all_triplets_deduped.json --output data/raw/conceptnet_clean.json --min-weight 0.5",
         cwd=base_dir
     )
 

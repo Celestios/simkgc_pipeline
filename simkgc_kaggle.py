@@ -20,36 +20,36 @@ PIPELINE_CONFIG = {
     "hf_repo": "Celestios/Persian-simkgc-256d",
 
     # Stage 0: BGE-M3 Teacher Target Encodings
-    # Options: "download" (pulls precomputed ~100MB cache from HF) or "recompute" (encodes fresh on GPU)
+    # Options: "download" (pulls precomputed cache from HF) or "recompute" (encodes fresh on GPU)
     "teacher_targets_mode": "download",
 
     # Stage 1A: TextEmbedder Training (Layers 1–8)
-    "run_stage_1a": True,
+    "run_stage_1a": False,               # Skipped (Already trained)
     "stage_1a_epochs": 4,
     "stage_1a_batch_size": 512,
-    "stage_1a_resume": True,             # Resume from local checkpoint if available
-    "stage_1a_from_hf": True,           # Download Stage 1A checkpoint from HF
-    "stage_1a_push_to_hf": True,         # Upload Stage 1A model to HF
+    "stage_1a_resume": True,
+    "stage_1a_from_hf": True,
+    "stage_1a_push_to_hf": True,
 
     # Stage 1B: RelationalCore Training (Layers 9–12)
-    "run_stage_1b": True,
-    "stage_1b_epochs": 10,
+    "run_stage_1b": True,                # ACTIVE
+    "stage_1b_epochs": 15,               # Extended training for deeper convergence
     "stage_1b_batch_size": 512,
-    "stage_1b_resume": True,             # Resume from local checkpoint if available
-    "stage_1b_from_hf": True,           # Download Stage 1B checkpoint from HF
-    "stage_1b_push_to_hf": True,         # Upload Stage 1B model to HF
+    "stage_1b_resume": True,             # Resume if local epoch exists
+    "stage_1b_from_hf": False,           # Train fresh or from local checkpoints
+    "stage_1b_push_to_hf": True,         # Automatically upload best model to HF
 
     # Stage 2: AssembledBiEncoder Joint Calibration & Auto-Export
-    "run_stage_2": True,
+    "run_stage_2": False,                # Keep False until Stage 1B finishes
     "stage_2_epochs": 15,
     "stage_2_batch_size": 512,
-    "stage_2_resume": True,              # Resume from local checkpoint if available
-    "stage_2_from_hf": True,            # Download Stage 2 model from HF
-    "stage_2_push_to_hf": True,          # Upload full release bundle to HF
-    "stage_2_auto_export": True,         # Automatically generate ONNX INT8 + 12.8MB Binary
+    "stage_2_resume": True,
+    "stage_2_from_hf": True,
+    "stage_2_push_to_hf": True,
+    "stage_2_auto_export": True,
 
     # Verification & Benchmarks
-    "run_smoke_test": True
+    "run_smoke_test": False
 }
 # =====================================================================
 

@@ -118,7 +118,12 @@ def train_core(config_path: str = "config/training_config.yaml",
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if not teacher_cache.exists() or not teacher_dict.exists():
-        print(f"[ERROR] Teacher targets not found at {teacher_cache}. Run src/data/teacher_embedder.py first.")
+        print(f"[STAGE 1B] Teacher targets not found locally. Downloading from Hugging Face: {target_hf_repo}...")
+        download_from_hf("bge_m3_concept_targets.npy", teacher_cache.parent, repo_id=target_hf_repo, token=hf_token)
+        download_from_hf("concepts_dict.json", teacher_dict.parent, repo_id=target_hf_repo, token=hf_token)
+
+    if not teacher_cache.exists() or not teacher_dict.exists():
+        print(f"[ERROR] Teacher targets could not be loaded at {teacher_cache}. Please check Hugging Face repo.")
         return
 
     print(f"Loading concept targets from {teacher_cache}...")

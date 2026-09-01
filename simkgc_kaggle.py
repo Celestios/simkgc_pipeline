@@ -66,11 +66,19 @@ if not HF_TOKEN:
     except Exception:
         pass
 
-if HF_TOKEN:
-    print(f"[AUTH] Hugging Face Token successfully loaded! (Prefix: {HF_TOKEN[:8]}...)", flush=True)
-else:
-    print("[AUTH WARNING] HF_TOKEN secret not found in Kaggle environment. Automatic upload may fail with 401.", flush=True)
-    print("  -> To enable automatic uploads: On Kaggle top menu, click Add-ons -> Secrets -> Add 'HF_TOKEN'.", flush=True)
+if not HF_TOKEN:
+    print("\n" + "!" * 80, flush=True)
+    print("  [FATAL AUTH ERROR] HF_TOKEN SECRET NOT FOUND IN KAGGLE ENVIRONMENT!", flush=True)
+    print("  The run has been aborted immediately to prevent training without uploading to Hugging Face.", flush=True)
+    print("  ", flush=True)
+    print("  -> HOW TO FIX (Takes 10 seconds):", flush=True)
+    print("     1. In Kaggle top menu bar, click 'Add-ons' -> 'Secrets'", flush=True)
+    print("     2. Add Label: 'HF_TOKEN', Value: '<YOUR_HF_TOKEN>'", flush=True)
+    print("     3. Check the box 'Attach to this notebook'", flush=True)
+    print("!" * 80 + "\n", flush=True)
+    sys.exit(1)
+
+print(f"[AUTH SUCCESS] Hugging Face Token verified! (Prefix: {HF_TOKEN[:8]}...)", flush=True)
 
 os.environ["PYTHONUNBUFFERED"] = "1"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"

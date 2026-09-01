@@ -66,6 +66,12 @@ if not HF_TOKEN:
     except Exception:
         pass
 
+if HF_TOKEN:
+    print(f"[AUTH] Hugging Face Token successfully loaded! (Prefix: {HF_TOKEN[:8]}...)", flush=True)
+else:
+    print("[AUTH WARNING] HF_TOKEN secret not found in Kaggle environment. Automatic upload may fail with 401.", flush=True)
+    print("  -> To enable automatic uploads: On Kaggle top menu, click Add-ons -> Secrets -> Add 'HF_TOKEN'.", flush=True)
+
 os.environ["PYTHONUNBUFFERED"] = "1"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
@@ -150,6 +156,8 @@ def main():
             cmd_1a += f" --from-hf {HF_REPO}"
         if PIPELINE_CONFIG["stage_1a_push_to_hf"]:
             cmd_1a += f" --push-to-hf --hf-repo {HF_REPO}"
+            if HF_TOKEN:
+                cmd_1a += f" --hf-token {HF_TOKEN}"
         run_step("5. STAGE 1A: Train TextEmbedder (Layers 1-8)", cmd_1a, cwd=base_dir)
 
     # 6. Stage 1B: RelationalCore Training (Layers 9-12)
@@ -161,6 +169,8 @@ def main():
             cmd_1b += f" --from-hf {HF_REPO}"
         if PIPELINE_CONFIG["stage_1b_push_to_hf"]:
             cmd_1b += f" --push-to-hf --hf-repo {HF_REPO}"
+            if HF_TOKEN:
+                cmd_1b += f" --hf-token {HF_TOKEN}"
         run_step("6. STAGE 1B: Train RelationalCore (Layers 9-12)", cmd_1b, cwd=base_dir)
 
     # 7. Stage 2: Joint Assembled Model Calibration & Automated Export
@@ -174,6 +184,8 @@ def main():
             cmd_2 += f" --from-hf {HF_REPO}"
         if PIPELINE_CONFIG["stage_2_push_to_hf"]:
             cmd_2 += f" --push-to-hf --hf-repo {HF_REPO}"
+            if HF_TOKEN:
+                cmd_2 += f" --hf-token {HF_TOKEN}"
         run_step("7. STAGE 2: Joint Calibration & Export", cmd_2, cwd=base_dir)
 
     # 8. Live Smoke Test Across All Capabilities

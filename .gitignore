@@ -15,6 +15,10 @@ __pycache__/
 /exports/
 /checkpoints/
 /models/
+# Kaggle & Local Caches
+/cache/
+/kaggle_downloaded/
+/kaggle_logs/
 
 # OS artifacts
 .DS_Store

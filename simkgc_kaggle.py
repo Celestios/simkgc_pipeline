@@ -33,10 +33,10 @@ PIPELINE_CONFIG = {
 
     # Stage 1B: RelationalCore Training (Layers 9–12)
     "run_stage_1b": True,                # ACTIVE
-    "stage_1b_epochs": 15,               # Extended training for deeper convergence
+    "stage_1b_epochs": 5,                # 5 additional refinement epochs on top of HF model
     "stage_1b_batch_size": 512,
     "stage_1b_resume": True,             # Resume if local epoch exists
-    "stage_1b_from_hf": False,           # Train fresh or from local checkpoints
+    "stage_1b_from_hf": True,            # Download Stage 1B checkpoint from HF
     "stage_1b_push_to_hf": True,         # Automatically upload best model to HF
 
     # Stage 2: AssembledBiEncoder Joint Calibration & Auto-Export

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Kaggle Cloud Job Manager & Live Terminal Log Streamer.
-Streams real-time live terminal logs directly from Kaggle's cloud API.
+Handles ephemeral authentication injection for private Kaggle cloud executions,
+streams real-time live terminal logs directly from Kaggle's cloud API.
 """
 
 import os
@@ -32,13 +33,41 @@ def run_cmd(cmd: str) -> str:
     res = subprocess.run(cmd, shell=True, capture_output=True, text=True)
     return (res.stdout or res.stderr).strip()
 
+def get_local_hf_token() -> str:
+    token_file = Path.home() / ".huggingface" / "token"
+    if token_file.exists():
+        t = token_file.read_text(encoding="utf-8").strip()
+        if t:
+            return t
+    cache_token = Path.home() / ".cache" / "huggingface" / "token"
+    if cache_token.exists():
+        t = cache_token.read_text(encoding="utf-8").strip()
+        if t:
+            return t
+    return os.environ.get("HF_TOKEN", "").strip()
+
 def push_kernel():
-    print(f"[*] Pushing new kernel version for '{KERNEL_ID}' to Kaggle cloud...")
-    out = run_cmd("kaggle kernels push -p .")
-    print(out)
-    print("\n[OK] Cloud GPU (T4 x2) training started on Kaggle!")
-    print(f"Live web console: https://www.kaggle.com/code/{KERNEL_ID}")
-    print("Run: python scripts/kaggle_watch.py watch  (to stream live terminal logs)")
+    hf_token = get_local_hf_token()
+    kaggle_script = Path("simkgc_kaggle.py")
+    orig_code = kaggle_script.read_text(encoding="utf-8")
+
+    try:
+        if hf_token:
+            injected_code = orig_code.replace(
+                'HF_TOKEN = os.environ.get("HF_TOKEN")',
+                f'HF_TOKEN = os.environ.get("HF_TOKEN") or "{hf_token}"'
+            )
+            kaggle_script.write_text(injected_code, encoding="utf-8")
+            print(f"[*] Authenticated private payload with Hugging Face Token (Prefix: {hf_token[:8]}...)")
+
+        print(f"[*] Pushing new kernel version for '{KERNEL_ID}' to Kaggle cloud GPU...")
+        out = run_cmd("kaggle kernels push -p .")
+        print(out)
+        print("\n[OK] Cloud GPU (T4 x2) training started on Kaggle!")
+        print(f"Live web console: https://www.kaggle.com/code/{KERNEL_ID}")
+        print("Run: python scripts/kaggle_watch.py watch  (to stream live terminal logs)")
+    finally:
+        kaggle_script.write_text(orig_code, encoding="utf-8")
 
 def check_status() -> str:
     out = run_cmd(f"kaggle kernels status {KERNEL_ID}")
@@ -65,7 +94,6 @@ def stream_logs(interval: int = 5):
             status_res = api.kernels_status(KERNEL_ID)
             status = str(status_res.status if hasattr(status_res, 'status') else status_res)
             
-            # Fetch log directly from API client
             try:
                 LOG_DIR.mkdir(parents=True, exist_ok=True)
                 api.kernels_output(KERNEL_ID, str(LOG_DIR), force=True, quiet=True)

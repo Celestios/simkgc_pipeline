@@ -346,12 +346,11 @@ def load_model_for_export(checkpoint_dir: Path, backbone_name: str = "sentence-t
         return SimKGCBiEncoder(backbone_name=backbone_name)
 
     state_dict = torch.load(model_path, map_location="cpu")
-    keys = list(state_dict.keys())
-    
     if any(k.startswith("text_embedder.") or k.startswith("relational_core.") for k in keys):
         print("[Model Loader] Detected Modular AssembledBiEncoder checkpoint structure.")
+        from src.data.relations import CANONICAL_RELATIONS
         embedder = TextEmbedder(backbone_name=backbone_name, output_dim=256, split_layer=8)
-        core = RelationalCore(backbone_name=backbone_name, input_dim=256, output_dim=256, split_layer=8, total_layers=12)
+        core = RelationalCore(backbone_name=backbone_name, input_dim=256, output_dim=256, num_relations=len(CANONICAL_RELATIONS), split_layer=8, total_layers=12)
         model = AssembledBiEncoder(embedder, core)
     else:
         print("[Model Loader] Detected Standard SimKGCBiEncoder checkpoint structure.")

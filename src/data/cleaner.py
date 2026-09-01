@@ -30,9 +30,10 @@ def is_persian_text(text: str) -> bool:
 def normalize_concept_text(text: str, lang: str = "en") -> str:
     """
     Normalizes concept strings, enforces standard Persian characters (ی, ک),
-    handles zero-width non-joiners (ZWNJ), and strips punctuation.
+    handles zero-width non-joiners (ZWNJ), and strips punctuation and tags like (noun).
     """
     text = text.strip().strip('"\'')
+    text = re.sub(r'\(.*?\)', '', text)  # Strip ConceptNet grammatical tags
     if is_persian_text(text) or lang == "fa":
         text = text.replace('\u064A', '\u06CC').replace('\u0649', '\u06CC')
         text = text.replace('\u0643', '\u06A9')

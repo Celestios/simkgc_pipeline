@@ -24,15 +24,16 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from src.model.modular_encoder import TextEmbedder, RelationalCore, AssembledBiEncoder
-from src.model.loss import SimKGCMatryoshkaLoss, SimKGCDistillationLoss
+from src.model.loss import SimKGCContrastiveLoss, SimKGCDistillationLoss
 from src.data.dataset import SimKGCDataset, SimKGCCollator
+from src.data.relations import CANONICAL_RELATIONS
 from src.utils.checkpoint import find_latest_local_checkpoint, download_from_hf, upload_file_to_hf
 from src.export import run_production_export
 
 def evaluate_model(model: nn.Module, val_loader: DataLoader, device: torch.device, output_dim: int, temperature: float = 0.05) -> Dict[str, float]:
     """Evaluates AssembledBiEncoder on holdout graph triples."""
     model.eval()
-    criterion = SimKGCMatryoshkaLoss(temperature=temperature, primary_dim=output_dim)
+    criterion = SimKGCContrastiveLoss(temperature=temperature)
     total_val_loss = 0.0
     total_rr = 0.0
     hits_1 = 0
@@ -112,7 +113,7 @@ def train_joint(config_path: str = "config/training_config.yaml",
     # 1. Initialize Sub-Networks
     tokenizer = AutoTokenizer.from_pretrained(backbone_name)
     embedder = TextEmbedder(backbone_name=backbone_name, output_dim=output_dim, split_layer=8)
-    core = RelationalCore(backbone_name=backbone_name, input_dim=output_dim, output_dim=output_dim, split_layer=8, total_layers=12)
+    core = RelationalCore(backbone_name=backbone_name, input_dim=output_dim, output_dim=output_dim, num_relations=len(CANONICAL_RELATIONS), split_layer=8, total_layers=12)
 
     # 2. Check for Stage 1A Embedder checkpoint (Local -> HF)
     embedder_path = Path(embedder_ckpt or "checkpoints/stage1_embedder/embedder_l1_8_final.pt")
@@ -173,7 +174,7 @@ def train_joint(config_path: str = "config/training_config.yaml",
         concept_to_idx = {c: i for i, c in enumerate(teacher_concepts)}
         criterion = SimKGCDistillationLoss(temperature=temperature, alpha=float(distill_cfg.get("alpha", 0.5)))
     else:
-        criterion = SimKGCMatryoshkaLoss(temperature=temperature, primary_dim=output_dim)
+        criterion = SimKGCContrastiveLoss(temperature=temperature)
 
     # 7. Dataset and DataLoaders
     data_files = config["data"]["train_files"]

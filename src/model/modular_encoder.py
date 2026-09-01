@@ -104,7 +104,7 @@ class RelationalCore(nn.Module):
                  backbone_name: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
                  input_dim: int = 256,
                  output_dim: int = 256,
-                 num_relations: int = 32,
+                 num_relations: int = 59,
                  split_layer: int = 8,
                  total_layers: int = 12,
                  dropout: float = 0.1,

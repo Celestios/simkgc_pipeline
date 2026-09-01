@@ -40,7 +40,7 @@ PIPELINE_CONFIG = {
     "stage_1b_push_to_hf": True,         # Automatically upload best model to HF
 
     # Stage 2: AssembledBiEncoder Joint Calibration & Auto-Export
-    "run_stage_2": False,                # Keep False until Stage 1B finishes
+    "run_stage_2": True,                 # Automatically chains after Stage 1B
     "stage_2_epochs": 15,
     "stage_2_batch_size": 512,
     "stage_2_resume": True,
@@ -49,7 +49,7 @@ PIPELINE_CONFIG = {
     "stage_2_auto_export": True,
 
     # Verification & Benchmarks
-    "run_smoke_test": False
+    "run_smoke_test": True
 }
 # =====================================================================
 

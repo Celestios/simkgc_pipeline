@@ -1,70 +1,48 @@
 #!/usr/bin/env python3
 """
-High-Precision Knowledge Graph Cleaner with Canonical Relation Filtering & Bidirectional Inverses.
-Filters assertions to ensure:
-  1. Only canonical relations (32 categories) are preserved.
-  2. Generates bidirectional inverse relations automatically with correct language tagging.
-  3. Persian text is standardized (Arabic characters -> Persian, ZWNJ normalization).
-  4. ConceptNet noisy suffixes, self-loops, and duplicates are purged.
-  5. Supports merging multiple raw/synthetic datasets in one unified pass.
+Knowledge Graph Triple Cleaner, Invertor, and Multi-Source Dataset Merger.
+Merges base knowledge graphs (downloaded from Hugging Face) with newly generated
+synthetic phrase triplets from Git, applies typography normalization, and generates
+bidirectional inverse graph links.
 """
 
-import sys
+import os
 import re
 import json
 import argparse
 from pathlib import Path
-from typing import List, Dict, Tuple, Set
+from typing import List, Dict, Set, Tuple, Optional
 
-# Ensure repo root is in Python module search path
+# Add project root to sys.path
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+from src.data.relations import (
+    CANONICAL_RELATIONS,
+    CANONICAL_RELATION_NAMES,
+    canonicalize_relation,
+    get_inverse_relation
+)
+from src.utils.checkpoint import download_from_hf, get_resolved_hf_token
 
-try:
-    from src.data.relations import (
-        canonicalize_relation,
-        get_inverse_relation,
-        CANONICAL_RELATION_NAMES,
-        is_persian_text
-    )
-except ImportError:
-    from relations import (
-        canonicalize_relation,
-        get_inverse_relation,
-        CANONICAL_RELATION_NAMES,
-        is_persian_text
-    )
+def is_persian_text(text: str) -> bool:
+    """Detects if a string contains Persian/Arabic characters."""
+    return bool(re.search(r'[\u0600-\u06FF]', text))
 
-PERSIAN_CHAR_MAP = {
-    'ي': 'ی',
-    'ك': 'ک',
-    'ى': 'ی',
-    'ة': 'ه',
-    'ۀ': 'ه',
-    '۰': '0', '۱': '1', '۲': '2', '۳': '3', '۴': '4',
-    '۵': '5', '۶': '6', '۷': '7', '۸': '8', '۹': '9',
-}
-
-def normalize_concept_text(text: str, lang: str = "fa") -> str:
-    """Normalizes concept labels."""
-    if not text:
-        return ""
-        
-    text = text.strip()
-    text = re.sub(r'\s*\((noun|verb|adjective|adverb|n|v|adj|adv|phrase)\)', '', text, flags=re.IGNORECASE)
-    
-    if lang == "fa" or is_persian_text(text):
-        for k, v in PERSIAN_CHAR_MAP.items():
-            text = text.replace(k, v)
+def normalize_concept_text(text: str, lang: str = "en") -> str:
+    """
+    Normalizes concept strings, enforces standard Persian characters (ی, ک),
+    handles zero-width non-joiners (ZWNJ), and strips punctuation.
+    """
+    text = text.strip().strip('"\'')
+    if is_persian_text(text) or lang == "fa":
+        text = text.replace('\u064A', '\u06CC').replace('\u0649', '\u06CC')
+        text = text.replace('\u0643', '\u06A9')
         text = re.sub(r'[\u200B-\u200D\uFEFF]', '\u200c', text)
         text = re.sub(r'\s+', ' ', text)
     else:
-        text = re.sub(r'\s+', ' ', text).lower()
+        text = re.sub(r'\s+', ' ', text)
         
     return text.strip()
 
-# Backward compatibility alias
 normalize_text = normalize_concept_text
 
 def clean_knowledge_graph(triples: List[Dict], min_weight: float = 1.0, generate_inverses: bool = True) -> List[Dict]:
@@ -94,7 +72,8 @@ def clean_knowledge_graph(triples: List[Dict], min_weight: float = 1.0, generate
         if not head or not tail or head == tail:
             continue
             
-        if len(head) > 50 or len(tail) > 50:
+        # Allow rich phrases up to 70 characters
+        if len(head) > 70 or len(tail) > 70:
             continue
 
         head_lang = "fa" if is_persian_text(head) else "en"
@@ -127,20 +106,46 @@ def clean_knowledge_graph(triples: List[Dict], min_weight: float = 1.0, generate
                     
     return list(cleaned_map.values())
 
-def clean_dataset_files(input_paths: List[str], output_path: str, min_weight: float = 1.0) -> int:
-    """Reads multiple input JSON files, merges and cleans them, and writes output."""
+def clean_dataset_files(
+    input_paths: List[str],
+    output_path: str,
+    min_weight: float = 1.0,
+    from_hf: Optional[str] = None,
+    hf_token: Optional[str] = None
+) -> int:
+    """
+    Reads multiple input JSON files (from disk or auto-downloaded from Hugging Face),
+    merges them with local/git synthetic phrase datasets, and writes the unified output.
+    """
+    # 1. Auto-download from Hugging Face if a specified file is missing locally
+    if from_hf:
+        for ip in input_paths:
+            p = Path(ip)
+            if not p.exists():
+                print(f"[Cleaner] Input file '{p.name}' not found locally. Attempting download from {from_hf}...")
+                download_from_hf(p.name, p.parent, repo_id=from_hf, token=hf_token)
+
     all_triples = []
+    loaded_files = 0
+
     for ip in input_paths:
         p = Path(ip)
         if p.exists():
-            with open(p, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                if isinstance(data, list):
-                    all_triples.extend(data)
-                elif isinstance(data, dict) and "triples" in data:
-                    all_triples.extend(data["triples"])
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, list):
+                        all_triples.extend(data)
+                        loaded_files += 1
+                        print(f"  [+] Loaded {len(data):,} triples from {p}")
+                    elif isinstance(data, dict) and "triples" in data:
+                        all_triples.extend(data["triples"])
+                        loaded_files += 1
+                        print(f"  [+] Loaded {len(data['triples']):,} triples from {p}")
+            except Exception as e:
+                print(f"  [-] Error reading {p}: {e}")
 
-    print(f"Loaded {len(all_triples):,} raw assertions across {len(input_paths)} files.")
+    print(f"\n[Cleaner] Total Raw Assertions Loaded: {len(all_triples):,} across {loaded_files} source files.")
     cleaned = clean_knowledge_graph(all_triples, min_weight=min_weight, generate_inverses=True)
     
     out_p = Path(output_path)
@@ -148,14 +153,24 @@ def clean_dataset_files(input_paths: List[str], output_path: str, min_weight: fl
     with open(out_p, "w", encoding="utf-8") as f:
         json.dump(cleaned, f, ensure_ascii=False, indent=2)
         
-    print(f"Saved {len(cleaned):,} high-quality canonical assertions to {output_path}")
+    print(f"✓ Combined & Canonicalized: {len(cleaned):,} high-quality bidirectional triples saved to: {output_path}")
     return len(cleaned)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Clean and canonicalize knowledge graph triples.")
-    parser.add_argument("--inputs", nargs="+", default=["data/raw/conceptnet_subset.json"], help="Input file paths")
-    parser.add_argument("--output", default="data/raw/conceptnet_clean.json", help="Output file path")
-    parser.add_argument("--min-weight", type=float, default=1.0, help="Minimum assertion confidence weight")
+    parser = argparse.ArgumentParser(description="Clean, canonicalize, and merge knowledge graph datasets.")
+    parser.add_argument("--inputs", nargs="+", default=[
+        "data/raw/conceptnet_clean.json",
+        "data/raw/conceptnet_subset.json",
+        "data/synthetic/all_triplets_deduped.json"
+    ], help="Input file paths to merge")
+    parser.add_argument("--output", default="data/raw/conceptnet_clean.json", help="Unified output file path")
+    parser.add_argument("--min-weight", type=float, default=0.5, help="Minimum assertion confidence weight")
+    parser.add_argument("--from-hf", default=None, help="Optional Hugging Face repo ID to pull base dataset from")
     args = parser.parse_args()
     
-    clean_dataset_files(args.inputs, args.output, args.min_weight)
+    clean_dataset_files(
+        input_paths=args.inputs,
+        output_path=args.output,
+        min_weight=args.min_weight,
+        from_hf=args.from_hf
+    )

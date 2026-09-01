@@ -21,14 +21,14 @@ PIPELINE_CONFIG = {
 
     # Stage 0: BGE-M3 Teacher Target Encodings
     # Options: "download" (pulls precomputed ~100MB cache from HF) or "recompute" (encodes fresh on GPU)
-    "teacher_targets_mode": "recompute",
+    "teacher_targets_mode": "download",
 
     # Stage 1A: TextEmbedder Training (Layers 1–8)
     "run_stage_1a": True,
     "stage_1a_epochs": 4,
     "stage_1a_batch_size": 512,
     "stage_1a_resume": True,             # Resume from local checkpoint if available
-    "stage_1a_from_hf": False,           # Download Stage 1A checkpoint from HF
+    "stage_1a_from_hf": True,           # Download Stage 1A checkpoint from HF
     "stage_1a_push_to_hf": True,         # Upload Stage 1A model to HF
 
     # Stage 1B: RelationalCore Training (Layers 9–12)
@@ -36,7 +36,7 @@ PIPELINE_CONFIG = {
     "stage_1b_epochs": 10,
     "stage_1b_batch_size": 512,
     "stage_1b_resume": True,             # Resume from local checkpoint if available
-    "stage_1b_from_hf": False,           # Download Stage 1B checkpoint from HF
+    "stage_1b_from_hf": True,           # Download Stage 1B checkpoint from HF
     "stage_1b_push_to_hf": True,         # Upload Stage 1B model to HF
 
     # Stage 2: AssembledBiEncoder Joint Calibration & Auto-Export
@@ -44,7 +44,7 @@ PIPELINE_CONFIG = {
     "stage_2_epochs": 15,
     "stage_2_batch_size": 512,
     "stage_2_resume": True,              # Resume from local checkpoint if available
-    "stage_2_from_hf": False,            # Download Stage 2 model from HF
+    "stage_2_from_hf": True,            # Download Stage 2 model from HF
     "stage_2_push_to_hf": True,          # Upload full release bundle to HF
     "stage_2_auto_export": True,         # Automatically generate ONNX INT8 + 12.8MB Binary
 
@@ -127,8 +127,8 @@ def main():
             run_step("Download ConceptNet (~450MB)", "python src/data/download_conceptnet_subset.py --full", cwd=base_dir)
 
     run_step(
-        "3. Clean Triples & Generate Inverses",
-        "python src/data/cleaner.py --inputs data/raw/conceptnet_subset.json data/synthetic/all_triplets_deduped.json --output data/raw/conceptnet_clean.json --min-weight 0.5",
+        "3. Merge Base Dataset (HF) with Git Synthetic Phrases & Generate Inverses",
+        f"python src/data/cleaner.py --inputs data/raw/conceptnet_clean.json data/raw/conceptnet_subset.json data/synthetic/all_triplets_deduped.json --output data/raw/conceptnet_clean.json --min-weight 0.5 --from-hf {HF_REPO}",
         cwd=base_dir
     )
 

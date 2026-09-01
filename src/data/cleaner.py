@@ -113,8 +113,8 @@ def clean_knowledge_graph(triples: List[Dict], min_weight: float = 1.0, generate
 
 def clean_dataset_files(
     input_paths: List[str],
-    output_path: str,
-    min_weight: float = 1.0,
+    output_path: str = "data/raw/conceptnet_clean.json",
+    min_weight: float = 0.5,
     from_hf: Optional[str] = None,
     hf_token: Optional[str] = None
 ) -> int:
@@ -122,6 +122,7 @@ def clean_dataset_files(
     Reads multiple input JSON files (from disk or auto-downloaded from Hugging Face),
     merges them with local/git synthetic phrase datasets, and writes the unified output.
     """
+    hf_token = get_resolved_hf_token(hf_token)
     # 1. Auto-download from Hugging Face if a specified file is missing locally
     if from_hf:
         for ip in input_paths:
@@ -171,11 +172,13 @@ if __name__ == "__main__":
     parser.add_argument("--output", default="data/raw/conceptnet_clean.json", help="Unified output file path")
     parser.add_argument("--min-weight", type=float, default=0.5, help="Minimum assertion confidence weight")
     parser.add_argument("--from-hf", default=None, help="Optional Hugging Face repo ID to pull base dataset from")
+    parser.add_argument("--hf-token", default=None, help="Hugging Face API token")
     args = parser.parse_args()
     
     clean_dataset_files(
         input_paths=args.inputs,
         output_path=args.output,
         min_weight=args.min_weight,
-        from_hf=args.from_hf
+        from_hf=args.from_hf,
+        hf_token=args.hf_token
     )

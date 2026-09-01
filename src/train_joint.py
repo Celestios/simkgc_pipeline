@@ -142,13 +142,16 @@ def train_joint(config_path: str = "config/training_config.yaml",
 
     # 5. Check for Stage 2 Assembled Resume Checkpoint
     start_epoch = 0
+    assembled_from_stages = embedder_path.exists() and core_path.exists()
+
     if resume:
         latest_ckpt, last_epoch = find_latest_local_checkpoint(output_dir, prefix="assembled_epoch_")
         if latest_ckpt and latest_ckpt.exists():
             print(f"[RESUME: Local] Found Stage 2 checkpoint: {latest_ckpt} (Epoch {last_epoch})")
             model.load_state_dict(torch.load(latest_ckpt, map_location="cpu"))
             start_epoch = last_epoch
-        elif from_hf:
+        elif from_hf and not assembled_from_stages:
+            # Only pull full model from HF if we didn't just assemble from 1A & 1B
             hf_full = download_from_hf("simkgc_model.pt", output_dir, repo_id=from_hf, token=hf_token)
             if hf_full and hf_full.exists():
                 print(f"[RESUME: Hugging Face] Loaded full model from {from_hf}: {hf_full}")

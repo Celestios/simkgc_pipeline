@@ -298,6 +298,7 @@ def train_joint(config_path: str = "config/training_config.yaml",
         print(f"\n[HF Release] Uploading full production release bundle to: {target_hf_repo}...")
         files_to_sync = [
             (final_model_path, "simkgc_model.pt"),
+            (Path("data/raw/conceptnet_clean.json"), "conceptnet_clean.json"),
             (export_dir / "simkgc_256d.onnx", "simkgc_256d.onnx"),
             (export_dir / "simkgc_256d_int8.onnx", "simkgc_256d_int8.onnx"),
             (export_dir / "concepts_256d_int8.bin", "concepts_256d_int8.bin"),

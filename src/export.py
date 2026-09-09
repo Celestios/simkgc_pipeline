@@ -207,20 +207,33 @@ def export_to_onnx(model: nn.Module, tokenizer, output_onnx_path: Path, max_leng
     attention_mask = dummy_inputs["attention_mask"]
     
     print(f"\n[ONNX Exporter] Exporting PyTorch model to ONNX: {output_onnx_path}...")
-    torch.onnx.export(
-        wrapper,
-        (input_ids, attention_mask),
-        str(output_onnx_path),
-        input_names=["input_ids", "attention_mask"],
-        output_names=["embedding"],
-        dynamic_axes={
+    export_kwargs = {
+        "input_names": ["input_ids", "attention_mask"],
+        "output_names": ["embedding"],
+        "dynamic_axes": {
             "input_ids": {0: "batch_size", 1: "sequence_length"},
             "attention_mask": {0: "batch_size", 1: "sequence_length"},
             "embedding": {0: "batch_size"}
         },
-        opset_version=17,
-        do_constant_folding=True
-    )
+        "opset_version": 17,
+        "do_constant_folding": True
+    }
+    try:
+        torch.onnx.export(
+            wrapper,
+            (input_ids, attention_mask),
+            str(output_onnx_path),
+            dynamo=False,
+            **export_kwargs
+        )
+    except TypeError:
+        # Fallback for older PyTorch versions that do not accept the dynamo kwarg
+        torch.onnx.export(
+            wrapper,
+            (input_ids, attention_mask),
+            str(output_onnx_path),
+            **export_kwargs
+        )
     print(f"[OK] ONNX model exported ({output_onnx_path.stat().st_size / 1024 / 1024:.2f} MB)")
 
 def quantize_onnx_to_int8(input_onnx_path: Path, output_quant_path: Path):

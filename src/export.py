@@ -53,6 +53,8 @@ except (ImportError, ModuleNotFoundError):
     CANONICAL_RELATIONS = {}
     is_persian_text = lambda x: False
 
+from src.utils.checkpoint import download_from_hf, upload_file_to_hf, get_resolved_hf_token
+
 def quantize_int8_matrix(matrix: np.ndarray) -> Tuple[np.ndarray, bytes]:
     """Quantizes float32 matrix (-1.0 to 1.0) to INT8 [-127, 127] bytes."""
     clipped = np.clip(np.round(matrix * 127.0), -127, 127).astype(np.int8)
@@ -338,14 +340,26 @@ def export_concepts_to_rust_binary(
     print(f"     Binary:     {bin_output_path} ({bin_output_path.stat().st_size / 1024 / 1024:.2f} MB)")
     print(f"     Dictionary: {dict_output_path}")
 
-def load_model_for_export(checkpoint_dir: Path, backbone_name: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2") -> nn.Module:
+def load_model_for_export(
+    checkpoint_dir: Path,
+    backbone_name: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+    from_hf: Optional[str] = None,
+    hf_token: Optional[str] = None
+) -> nn.Module:
     """Dynamically detects whether checkpoint is AssembledBiEncoder or SimKGCBiEncoder and loads it."""
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
     model_path = checkpoint_dir / "simkgc_model.pt"
+    if not model_path.exists() and from_hf:
+        print(f"[Model Loader] Downloading simkgc_model.pt from Hugging Face ({from_hf})...")
+        download_from_hf("simkgc_model.pt", checkpoint_dir, repo_id=from_hf, token=hf_token)
+
     if not model_path.exists():
         # Fallback to base model
+        print(f"[WARNING] No checkpoint found at {model_path}. Initializing base model.")
         return SimKGCBiEncoder(backbone_name=backbone_name)
 
     state_dict = torch.load(model_path, map_location="cpu")
+    keys = list(state_dict.keys())
     if any(k.startswith("text_embedder.") or k.startswith("relational_core.") for k in keys):
         print("[Model Loader] Detected Modular AssembledBiEncoder checkpoint structure.")
         from src.data.relations import CANONICAL_RELATIONS
@@ -368,7 +382,11 @@ def run_production_export(
     fa_quota: int = 15000,
     en_quota: int = 35000,
     teacher_cache_path: Optional[Path] = None,
-    teacher_dict_path: Optional[Path] = None
+    teacher_dict_path: Optional[Path] = None,
+    from_hf: Optional[str] = None,
+    push_to_hf: bool = False,
+    hf_repo: Optional[str] = None,
+    hf_token: Optional[str] = None
 ):
     """Full export sequence producing all production assets for Centrode."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -385,7 +403,7 @@ def run_production_export(
     tokenizer.save_pretrained(str(output_dir))
     
     # Load model with polymorphic state dict detection
-    model = load_model_for_export(checkpoint_dir)
+    model = load_model_for_export(checkpoint_dir, from_hf=from_hf, hf_token=hf_token)
     
     # 1. ONNX & INT8 Export
     onnx_path = output_dir / "simkgc_256d.onnx"
@@ -469,6 +487,13 @@ def run_production_export(
         output_meta_path=output_dir / "relations_metadata.json"
     )
     
+    if push_to_hf and hf_repo:
+        print(f"\n[HF Upload] Uploading production export files to https://huggingface.co/{hf_repo}...")
+        resolved_token = get_resolved_hf_token(hf_token)
+        for exp_file in sorted(output_dir.glob("*")):
+            if exp_file.is_file():
+                upload_file_to_hf(exp_file, path_in_repo=exp_file.name, repo_id=hf_repo, token=resolved_token)
+
     print("\n[SUCCESS] Production export sequence completed successfully!")
 
 if __name__ == "__main__":
@@ -482,6 +507,10 @@ if __name__ == "__main__":
     parser.add_argument("--en-quota", type=int, default=35000, help="English concept quota")
     parser.add_argument("--teacher-cache", default="cache/bge_m3_concept_targets.npy", help="Teacher cache path")
     parser.add_argument("--teacher-dict", default="cache/concepts_dict.json", help="Teacher dict path")
+    parser.add_argument("--from-hf", default=None, help="Hugging Face repo ID to pull simkgc_model.pt from")
+    parser.add_argument("--push-to-hf", action="store_true", help="Upload export bundle to Hugging Face")
+    parser.add_argument("--hf-repo", default=None, help="Target Hugging Face repo ID")
+    parser.add_argument("--hf-token", default=None, help="Hugging Face API write token")
     args = parser.parse_args()
     
     t_cache = Path(args.teacher_cache) if args.teacher_cache else None
@@ -495,5 +524,9 @@ if __name__ == "__main__":
         fa_quota=args.fa_quota,
         en_quota=args.en_quota,
         teacher_cache_path=t_cache,
-        teacher_dict_path=t_dict
+        teacher_dict_path=t_dict,
+        from_hf=args.from_hf,
+        push_to_hf=args.push_to_hf,
+        hf_repo=args.hf_repo,
+        hf_token=args.hf_token
     )

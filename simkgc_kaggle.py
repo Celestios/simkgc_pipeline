@@ -39,14 +39,19 @@ PIPELINE_CONFIG = {
     "stage_1b_from_hf": True,
     "stage_1b_push_to_hf": True,
 
-    # Stage 2: AssembledBiEncoder Joint Calibration & Auto-Export
-    "run_stage_2": True,                 # ACTIVE - Trains on unified dataset
+    # Stage 2: AssembledBiEncoder Joint Calibration
+    "run_stage_2": False,                # Skipped (Trained through Epoch 6 on HF)
     "stage_2_epochs": 15,
     "stage_2_batch_size": 512,
     "stage_2_resume": True,
-    "stage_2_from_hf": True,            # Pulls 1A and 1B models from HF and assembles them
+    "stage_2_from_hf": True,
     "stage_2_push_to_hf": True,
     "stage_2_auto_export": True,
+
+    # Standalone Production Export (INT8 ONNX + 50K Concept Matrix + Relations)
+    "run_export": True,                  # ACTIVE - Run standalone export
+    "export_max_concepts": 50000,
+    "export_push_to_hf": True,           # Upload all exported assets to Hugging Face
 
     # Verification & Benchmarks
     "run_smoke_test": True
@@ -191,9 +196,27 @@ def main():
                 cmd_2 += f" --hf-token {HF_TOKEN}"
         run_step("7. STAGE 2: Joint Calibration & Export", cmd_2, cwd=base_dir)
 
-    # 8. Live Smoke Test Across All Capabilities
+    # 8. Standalone Production Export (INT8 ONNX + 50K Concept Matrix + Relations)
+    if PIPELINE_CONFIG.get("run_export"):
+        cmd_export = (
+            f"python src/export.py "
+            f"--checkpoint checkpoints/simkgc_fa_en "
+            f"--data data/raw/conceptnet_clean.json "
+            f"--output exports "
+            f"--max-concepts {PIPELINE_CONFIG.get('export_max_concepts', 50000)} "
+            f"--from-hf {HF_REPO}"
+        )
+        if (base_dir / "cache" / "bge_m3_concept_targets.npy").exists():
+            cmd_export += " --teacher-cache cache/bge_m3_concept_targets.npy --teacher-dict cache/concepts_dict.json"
+        if PIPELINE_CONFIG.get("export_push_to_hf"):
+            cmd_export += f" --push-to-hf --hf-repo {HF_REPO}"
+            if HF_TOKEN:
+                cmd_export += f" --hf-token {HF_TOKEN}"
+        run_step("8. PRODUCTION EXPORT: INT8 ONNX & Binary Database", cmd_export, cwd=base_dir)
+
+    # 9. Live Smoke Test Across All Capabilities
     if PIPELINE_CONFIG["run_smoke_test"]:
-        run_step("8. Verification Smoke Tests", "python src/demo_inference.py --benchmark", cwd=base_dir)
+        run_step("9. Verification Smoke Tests", "python src/demo_inference.py --benchmark", cwd=base_dir)
 
     print("\n================================================================================", flush=True)
     print(f"   [DONE] ALL ARTIFACTS DIRECTLY UPLOADED TO: https://huggingface.co/{HF_REPO}   ", flush=True)

@@ -129,7 +129,7 @@ def main():
     # 2. Install Dependencies
     run_step(
         "2. Install Dependencies",
-        "pip install -q torch transformers accelerate datasets onnx onnxruntime safetensors pyyaml requests tqdm huggingface_hub"
+        "pip install -q torch transformers accelerate datasets onnx onnxruntime onnxscript safetensors pyyaml requests tqdm huggingface_hub"
     )
 
     # 3. Clean & Prepare Knowledge Graph Data (1.6M Base from HF + Git Synthetic Phrases)
